@@ -77,14 +77,41 @@ public sealed class WebhookIngest
             ReceivedAt = DateTime.UtcNow
         };
 
+        var duplicate = false;
         try
         {
             await _store.Messages.InsertOneAsync(doc, cancellationToken: ct);
         }
         catch (MongoWriteException ex) when (ex.WriteError?.Code == 11000)
         {
-            _log.LogDebug("Duplicate webhook event {EventId} ignored", doc.WebhookEventId);
+            duplicate = true;
+            _log.LogDebug("Duplicate webhook event {EventId}; checking whether it still needs a job", doc.WebhookEventId);
+        }
+
+        var stored = await _store.Messages
+            .Find(Builders<MessageDoc>.Filter.Eq(m => m.LineMessageId, doc.LineMessageId))
+            .FirstOrDefaultAsync(ct);
+
+        if (stored is null || stored.ProcessedAt is not null)
+        {
             return;
+        }
+
+        var activeJobs = await _store.Jobs.CountDocumentsAsync(
+            Builders<JobDoc>.Filter.And(
+                Builders<JobDoc>.Filter.Eq(j => j.LineMessageId, doc.LineMessageId),
+                Builders<JobDoc>.Filter.Eq(j => j.Kind, "process_message"),
+                Builders<JobDoc>.Filter.In(j => j.Status, new[] { JobDoc.StatusPending, JobDoc.StatusRunning })),
+            cancellationToken: ct);
+
+        if (activeJobs > 0)
+        {
+            return;
+        }
+
+        if (duplicate)
+        {
+            _log.LogWarning("Message {MessageId} was stored without a job; re-enqueueing", doc.LineMessageId);
         }
 
         await _queue.EnqueueProcessAsync(doc.LineMessageId, TimeSpan.FromSeconds(_pipeline.CoalesceSeconds), ct);

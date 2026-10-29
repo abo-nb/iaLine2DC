@@ -21,6 +21,8 @@ public sealed class DiscordBotService : BackgroundService
 
     private int _disconnectsSinceReady;
     private int _gatewayRateLimitHits;
+    private int _stormCount;
+    private DateTime _lastDisconnectedAt = DateTime.MinValue;
     private volatile bool _cooling;
 
     public DiscordBotService(
@@ -178,6 +180,7 @@ public sealed class DiscordBotService : BackgroundService
 
     private Task OnConnectedAsync()
     {
+        _lastDisconnectedAt = DateTime.MinValue;
         _log.LogInformation("Discord gateway connected");
         return Task.CompletedTask;
     }
@@ -189,6 +192,7 @@ public sealed class DiscordBotService : BackgroundService
             Interlocked.Increment(ref _disconnectsSinceReady);
         }
 
+        _lastDisconnectedAt = DateTime.UtcNow;
         _log.LogWarning(exception, "Discord gateway disconnected");
         return Task.CompletedTask;
     }
@@ -197,6 +201,8 @@ public sealed class DiscordBotService : BackgroundService
     {
         Interlocked.Exchange(ref _disconnectsSinceReady, 0);
         Interlocked.Exchange(ref _gatewayRateLimitHits, 0);
+        _lastDisconnectedAt = DateTime.MinValue;
+        _stormCount = 0;
 
         _log.LogInformation("Discord ready as {User} in {Guilds} guild(s)",
             _client.CurrentUser?.Username ?? "unknown", _client.Guilds.Count);
@@ -208,7 +214,6 @@ public sealed class DiscordBotService : BackgroundService
     private async Task SuperviseAsync(CancellationToken ct)
     {
         var baseCooldown = TimeSpan.FromMinutes(Math.Max(1, _options.CooldownMinutes));
-        var storms = 0;
 
         while (!ct.IsCancellationRequested)
         {
@@ -228,14 +233,18 @@ public sealed class DiscordBotService : BackgroundService
 
             var disconnects = Volatile.Read(ref _disconnectsSinceReady);
             var rateLimitHits = Volatile.Read(ref _gatewayRateLimitHits);
-            if (disconnects < 3 && rateLimitHits < 2)
+            var offlineTooLong = _client.ConnectionState == ConnectionState.Disconnected
+                                 && _lastDisconnectedAt != DateTime.MinValue
+                                 && DateTime.UtcNow - _lastDisconnectedAt > TimeSpan.FromMinutes(3);
+
+            if (disconnects < 3 && rateLimitHits < 2 && !offlineTooLong)
             {
                 continue;
             }
 
             _cooling = true;
-            storms++;
-            var minutes = Math.Min(120, baseCooldown.TotalMinutes * Math.Pow(2, storms - 1));
+            _stormCount++;
+            var minutes = Math.Min(120, baseCooldown.TotalMinutes * Math.Pow(2, _stormCount - 1));
             var wait = TimeSpan.FromMinutes(minutes);
 
             _log.LogError(

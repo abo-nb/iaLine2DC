@@ -24,6 +24,8 @@ public sealed class LineApiClient
         }
     }
 
+    private const long MaxContentBytes = 20_000_000;
+
     public async Task<byte[]?> DownloadContentAsync(string messageId, CancellationToken ct)
     {
         try
@@ -33,16 +35,44 @@ public sealed class LineApiClient
 
             if (!response.IsSuccessStatusCode)
             {
-                _log.LogWarning("Content download failed for {MessageId}: {Status}", messageId, (int)response.StatusCode);
+                var status = (int)response.StatusCode;
+                if (status is 404 or 410)
+                {
+                    _log.LogWarning("Content {MessageId} is gone ({Status})", messageId, status);
+                    return null;
+                }
+
+                throw new HttpRequestException($"LINE content endpoint returned {status} for {messageId}");
+            }
+
+            if (response.Content.Headers.ContentLength is { } length && length > MaxContentBytes)
+            {
+                _log.LogWarning("Content {MessageId} is {Bytes} bytes, above the {Limit} byte cap",
+                    messageId, length, MaxContentBytes);
                 return null;
             }
 
-            return await response.Content.ReadAsByteArrayAsync(ct);
+            var bytes = await response.Content.ReadAsByteArrayAsync(ct);
+            if (bytes.Length > MaxContentBytes)
+            {
+                _log.LogWarning("Content {MessageId} exceeded the {Limit} byte cap after download",
+                    messageId, MaxContentBytes);
+                return null;
+            }
+
+            return bytes;
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (HttpRequestException)
+        {
+            throw;
         }
         catch (Exception ex)
         {
-            _log.LogWarning(ex, "Content download threw for {MessageId}", messageId);
-            return null;
+            throw new HttpRequestException($"Content download failed for {messageId}", ex);
         }
     }
 
