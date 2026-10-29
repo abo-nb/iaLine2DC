@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text;
 using Discord;
+using Discord.Net;
 using Discord.WebSocket;
 using MongoDB.Driver;
 using Msg2Dc.Configuration;
@@ -857,7 +858,7 @@ public sealed class DiscordCommandHandler
 
         try
         {
-            await command.DeferAsync(ephemeral);
+            await command.DeferAsync(ephemeral, FastOptions());
         }
         catch (Exception ex)
         {
@@ -865,16 +866,33 @@ public sealed class DiscordCommandHandler
         }
     }
 
-    private static async Task ReplyAsync(SocketSlashCommand command, string text, bool ephemeral)
+    private async Task ReplyAsync(SocketSlashCommand command, string text, bool ephemeral)
     {
         var content = DiscordText.Clip(text, DiscordText.MessageMax - 100);
 
-        if (command.HasResponded)
+        try
         {
-            await command.FollowupAsync(content, ephemeral: ephemeral, allowedMentions: AllowedMentions.None);
-            return;
-        }
+            if (command.HasResponded)
+            {
+                await command.FollowupAsync(
+                    content, ephemeral: ephemeral, allowedMentions: AllowedMentions.None, options: FastOptions());
+                return;
+            }
 
-        await command.RespondAsync(content, ephemeral: ephemeral, allowedMentions: AllowedMentions.None);
+            await command.RespondAsync(
+                content, ephemeral: ephemeral, allowedMentions: AllowedMentions.None, options: FastOptions());
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "Failed to reply to /{Command}", command.CommandName);
+        }
     }
+
+    /// <summary>
+    /// Interaction callbacks have a 3 second deadline and Discord.Net retries a 429 in a
+    /// tight loop, which turns one click into a hundred requests during a penalty.
+    /// Fail fast instead.
+    /// </summary>
+    private static RequestOptions FastOptions() =>
+        new() { RetryMode = RetryMode.Retry502, Timeout = 2000 };
 }
