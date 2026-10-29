@@ -1,6 +1,6 @@
 # 交接文档
 
-> 最后更新：2026-10-30　对应提交：`4969777`
+> 最后更新：2026-10-30　对应提交：`565e9b7`
 > 一句话：把 LINE 班级群的消息自动收进 MongoDB，用 LLM 拆成结构化条目，再推到 Discord 对应科目的频道。
 
 ---
@@ -9,15 +9,15 @@
 
 | 项目 | 状态 |
 |---|---|
-| 代码 | 已完成 M0–M2，`dotnet build` 0 警告 0 错误，测试 1/1 通过 |
+| 代码 | 已完成 M0–M2，`dotnet build` 0 警告 0 错误，测试 7/7 通过 |
 | 仓库 | https://github.com/abo-nb/iaLine2DC （`main`，工作区干净） |
 | 部署 | Render Free：https://ialine2dc.onrender.com |
 | LINE | webhook 已能验签、入库、入队（本地用真实 secret 验过） |
 | LLM | 用真实 Gemini key 跑通过一次完整分类（产出 1 条 item） |
-| Discord | 网关能连上（`ready as 114资应喵`），但**线上实例正卡在限流封禁里**，见第 7 节 |
+| Discord | 已修掉 429 紧循环，网关能稳定上线（`ready as 114资应喵`），见第 7 节 |
 | 未验证 | Discord 实际发卡片、斜杠指令端到端、资料库频道、撤回同步 |
 
-**接手第一件事**：确认 Discord 是否已恢复（第 7 节），再决定是否继续部署。
+**接手第一件事**：看 `/healthz` 的 `discord.state` 和 `discord.rateLimitedUntil`，再看第 7 节。
 
 ---
 
@@ -54,6 +54,8 @@ LINE 群（每群一科）
 | 科目用「名称」当主键 | `/subscribe 数学` 一步完成建科+绑定；代价是不支持重命名 |
 | 中文检索用二元组令牌 | MongoDB 的 `$text` 不能切中文，`$regex` 会随数据量变慢 |
 | 附件存 Discord | Render 免费层磁盘是临时的，重启即清空 |
+| gateway 主机写死为 `wss://gateway.discord.gg` | 跳过 `GET /gateway/bot`：它桶极小，且 Discord.Net 在 429 时会紧循环重发 |
+| 自己发起的 REST 调用不走 `AlwaysRetry` | 429 必须立即抛异常交给 `DiscordRateLimitGuard`，否则一次 429 会变成几百次请求 |
 
 ---
 
@@ -86,6 +88,8 @@ src/Msg2Dc/
 │  └─ LlmSelectionProvider.cs 模型选择缓存
 ├─ Discord/
 │  ├─ DiscordBotService.cs   网关 + 熔断 + 指令注册 + 邀请链接
+│  ├─ DiscordRateLimitGuard.cs 429 截止时间（落库）+ 唤醒监督循环
+│  ├─ RateLimitState.cs      纯状态机，可单测
 │  ├─ DiscordCommandHandler.cs 17 条指令
 │  ├─ DiscordPublisher.cs    卡片发送 + 附件归档 + 撤回删除
 │  ├─ DiscordEmbeds.cs       卡片排版（含长度上限保护）
@@ -166,21 +170,30 @@ curl -i -X POST localhost:5000/line/webhook \
 
 ---
 
-## 7. 当前阻塞：Discord 网关被限流封禁
+## 7. 已修：Discord 一上线就吃 3000+ 秒限流
 
-**症状**：日志刷 `Rate limit triggered: GET gateway/bot Remaining: 20xx s`，随后 `TimeoutException`，客户端反复重连。
+**症状**：新实例启动后第一次 `GET gateway/bot` 就 429（`Remaining: 3000+ s`），随后十几秒内发出几百次同样的请求，最后 `TimeoutException`；冷却结束后重试，惩罚还在，循环往复。同一个 token 在本地一切正常。
 
-**根因**：同一 token 短时间内被大量请求。最常见是「旧实例没停就部署新实例」——Render 零停机部署期间新旧同时在线，Discord 踢掉旧会话、旧的又重连，循环放大。**封禁是时间型的，越重试越不恢复。**
+**真正的根因**（2026-10-29 用 Render API 拉日志确认）：
 
-**已经做的防护**（提交 `4969777`）：15 秒窗口内 ≥3 次断线或 ≥2 次限流命中 → 主动 `StopAsync`，冷却 10 分钟，之后每次翻倍（上限 120 分钟）；单次致命断线 3 分钟后也会自愈重启。
+1. `Discord.Net 3.20.2` 的 `RequestBucket.SendAsync` 收到 429 后 `continue`，是否等待取决于 `UpdateRateLimit` 写入的 reset 时间；解析不到时它按 0 处理，于是**同一个请求在十几秒内以约 10ms 的间隔重发**（实测 573 次/12 秒、903 次/15 秒）。
+2. 这种量级会触发 Discord 的长惩罚（1500–3400 秒），并且 `GET gateway/bot` 的桶极小，新实例启动第一件事就是打它。
+3. `DefaultRetryMode = AlwaysRetry` 让请求不会抛异常，只能等到请求自身超时（约 15 秒）才停。
+4. 应用的熔断计数在每次 `Ready` 清零，真实循环里永远攒不够阈值。
 
-**处置步骤**：
-1. Render 上 **Suspend**（不是 Restart）。
-2. 静置到限流桶 reset（日志里的 `Remaining` 归零），通常 30–40 分钟。
-3. 确认只有一个实例在用这个 token（本地不要再跑）。
-4. Resume，日志应出现 `Discord ready as ...`。
+**修法**（对应提交见 §8 之前的说明）：
 
-**铁律**：一个 token 同时只能有一个进程在连。部署前先停旧实例。
+| 改动 | 作用 |
+|---|---|
+| `DiscordSocketConfig.GatewayHost = "wss://gateway.discord.gg"` | 完全不请求 `GET /gateway/bot`，启动路径不再碰那个小桶 |
+| `DefaultRatelimitCallback` → `DiscordRateLimitGuard` | 拿到真实 `Retry-After`，立刻唤醒监督循环 |
+| 自己发起的 REST 调用用 `RetryMode.Retry502` | 429 直接抛 `RateLimitedException`，不再紧循环 |
+| 熔断改成 10 分钟滑动窗口，`Ready` 不再清零 | 「连上→被踢→重连」能被正确统计 |
+| 限流截止时间写进 Mongo `systemState` | 重启/部署后不会立刻再撞上去 |
+
+**现在的行为**：网关连接与 REST 限流解耦；REST 被限流时记录截止时间并跳过指令注册，网关保持在线。`/healthz` 新增 `discord.state` / `discord.rateLimitedUntil` / `discord.lastRetryAfterSeconds`。
+
+**如果再次出现**：先看 `/healthz` 的 `discord.rateLimitedUntil`，再对照 Render 日志里的 `[Discord/Rest] Rate limit triggered` 是哪个 route；只要日志不再出现同一行每 10ms 重复，就说明紧循环没有回来。
 
 ---
 
@@ -190,21 +203,19 @@ curl -i -X POST localhost:5000/line/webhook \
 
 1. **归档附件链接缺 `guild_id`** —— `DiscordPublisher` 生成的 jump link 全部无效。
 2. **`/reprocess` 不清理旧 item/post** —— 重跑会产生重复卡片。
-3. **Discord 写操作没有超时与取消** —— 429 时 worker 会被长时间占用。
 
 ### 中
 
-4. **`/set-model` 的命令超时（30s）短于它自己的探测窗口（45s）** —— 慢模型永远选不上，且报错误导。
-5. **每次 `Ready` 重注册 17 条指令**，且注册失败也打印 `Registered N` —— 限流放大 + 日志说谎。
-6. **`settings` 没有唯一键**，首次并发写可能产生多份配置。
-7. **索引初始化失败只留一条 warning**，唯一约束缺失时会被静默容忍。
-8. **`dead` 状态的 job 没有出口**，也没有任何保留策略（jobs / llmLogs / rawJson 会一直涨）。
+3. **`/set-model` 的命令超时（30s）短于它自己的探测窗口（45s）** —— 慢模型永远选不上，且报错误导。
+4. **`settings` 没有唯一键**，首次并发写可能产生多份配置。
+5. **索引初始化失败只留一条 warning**，唯一约束缺失时会被静默容忍。
+6. **`dead` 状态的 job 没有出口**，也没有任何保留策略（jobs / llmLogs / rawJson 会一直涨）。
+7. **`DiscordCommandHandler` 里的 REST 调用仍用默认 `AlwaysRetry`** —— 已修的是启动/注册/发布三条路径；指令处理器里的调用如果 429，仍会重试到请求超时（约 15 秒），要靠 `DiscordRateLimitGuard` 兜底。
 
 ### 低
 
-9. `kind` 词表与卡片展示层不一致，`notes/question/resource` 会以英文原样显示。
-10. 限流计数器按日志行累加（12 秒内可到 358 次），能正确触发熔断但噪音大。
-11. `IDiscordPublisher.IsReady` 没有被使用，发布前没有就绪门控。
+8. `kind` 词表与卡片展示层不一致，`notes/question/resource` 会以英文原样显示。
+9. `IDiscordPublisher.IsReady` 没有被使用，发布前没有就绪门控。
 
 > 以上来自 5 个子代理的完整代码审查，已修的一批见 `496ce9e` 的提交信息。
 
@@ -240,6 +251,6 @@ curl -i -X POST localhost:5000/line/webhook \
 | 收不到消息 | `/healthz` 的 `mongo`；LINE Console 的 Webhook 状态；`Allow bot to join group chats` 是否开 |
 | 消息进了库但没推送 | `subscriptions` 里有没有该科目；`/status` 看队列积压 |
 | Discord 指令没反应 | bot 是否在线（日志 `ready as`）；指令是 guild 还是 global；`AdminIds` 是否包含自己 |
-| 日志刷 Rate limit | 见第 7 节，先停服务等桶恢复 |
+| 日志刷 Rate limit | 先看 `/healthz` 的 `discord.rateLimitedUntil`；同一行每 10ms 重复就是紧循环回来了，见第 7 节 |
 | LLM 报 400/403 | `/status` 看模型名；`/set-model` 重新验证；key 是否有效 |
 | 服务莫名重启 | Render 事件里的 `server_restarted` / OOM；免费层 512 MB |

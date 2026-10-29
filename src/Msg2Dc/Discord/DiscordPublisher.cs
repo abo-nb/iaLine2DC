@@ -27,8 +27,7 @@ public sealed class DiscordPublisher : IDiscordPublisher
         _log = log;
     }
 
-    public bool IsReady =>
-        _options.Enabled &&
+    public bool IsReady =>        _options.Enabled &&
         !string.IsNullOrWhiteSpace(_options.Token) &&
         _client.ConnectionState == ConnectionState.Connected;
 
@@ -75,6 +74,7 @@ public sealed class DiscordPublisher : IDiscordPublisher
             var sent = await channel.SendFileAsync(
                 new FileAttachment(stream, fileName),
                 header,
+                options: WriteOptions(ct),
                 allowedMentions: AllowedMentions.None);
 
             var uploaded = sent.Attachments.FirstOrDefault();
@@ -88,6 +88,13 @@ public sealed class DiscordPublisher : IDiscordPublisher
                 sent.Id.ToString(),
                 uploaded?.Id.ToString(),
                 "archived");
+        }
+        catch (RateLimitedException ex)
+        {
+            _log.LogWarning(
+                "Discord rate limited while archiving {FileName} to channel {ChannelId}: {Message}",
+                fileName, channelId, ex.Message);
+            return null;
         }
         catch (Exception ex)
         {
@@ -130,9 +137,16 @@ public sealed class DiscordPublisher : IDiscordPublisher
                 var sent = await channel.SendMessageAsync(
                     text: null,
                     embeds: new[] { embed },
+                    options: WriteOptions(ct),
                     allowedMentions: AllowedMentions.None);
 
                 posts.Add(new PostRef(channelId, sent.Id.ToString()));
+            }
+            catch (RateLimitedException ex)
+            {
+                _log.LogWarning(
+                    "Discord rate limited publishing item {ItemId} to channel {ChannelId}: {Message}",
+                    item.Id, channelId, ex.Message);
             }
             catch (Exception ex)
             {
@@ -167,7 +181,7 @@ public sealed class DiscordPublisher : IDiscordPublisher
 
             try
             {
-                await channel.DeleteMessageAsync(messageId, new RequestOptions { CancelToken = ct });
+                await channel.DeleteMessageAsync(messageId, WriteOptions(ct));
             }
             catch (HttpException ex) when (ex.DiscordCode == DiscordErrorCode.UnknownMessage)
             {
@@ -231,4 +245,11 @@ public sealed class DiscordPublisher : IDiscordPublisher
 
         return DiscordText.Clip(string.Join(" · ", parts), DiscordText.MessageMax - 100);
     }
+
+    /// <summary>
+    /// Discord.Net's default RetryMode retries a 429 in a tight loop; fail fast instead
+    /// so the caller (and the rate-limit guard) can back off properly.
+    /// </summary>
+    private static RequestOptions WriteOptions(CancellationToken ct) =>
+        new() { RetryMode = RetryMode.Retry502, CancelToken = ct };
 }

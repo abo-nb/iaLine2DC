@@ -28,6 +28,7 @@ public sealed class MongoStore
     public IMongoCollection<SettingsDoc> Settings => _db.GetCollection<SettingsDoc>("settings");
     public IMongoCollection<JobDoc> Jobs => _db.GetCollection<JobDoc>("jobs");
     public IMongoCollection<LlmLogDoc> LlmLogs => _db.GetCollection<LlmLogDoc>("llmLogs");
+    public IMongoCollection<SystemStateDoc> SystemStates => _db.GetCollection<SystemStateDoc>("systemState");
 
     public async Task EnsureIndexesAsync(CancellationToken ct)
     {
@@ -85,6 +86,10 @@ public sealed class MongoStore
         await Jobs.Indexes.CreateOneAsync(
             new CreateIndexModel<JobDoc>(Builders<JobDoc>.IndexKeys
                 .Ascending(j => j.Status).Ascending(j => j.RunAfter)), cancellationToken: ct);
+
+        await SystemStates.Indexes.CreateOneAsync(
+            new CreateIndexModel<SystemStateDoc>(Builders<SystemStateDoc>.IndexKeys.Ascending(s => s.Key),
+                new CreateIndexOptions { Unique = true }), cancellationToken: ct);
     }
 
     public async Task<bool> PingAsync(TimeSpan timeout, CancellationToken ct)

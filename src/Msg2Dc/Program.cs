@@ -1,4 +1,6 @@
 using System.Text.Json;
+using Discord;
+using Discord.WebSocket;
 using Microsoft.Extensions.Options;
 using Msg2Dc;
 using Msg2Dc.Configuration;
@@ -41,7 +43,14 @@ if (!string.IsNullOrWhiteSpace(port))
 
 var jsonOptions = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
 
-app.MapGet("/healthz", async (MongoStore store, JobQueue queue, IOptions<LineOptions> line, ILlmClassifier classifier, CancellationToken ct) =>
+app.MapGet("/healthz", async (
+    MongoStore store,
+    JobQueue queue,
+    IOptions<LineOptions> line,
+    ILlmClassifier classifier,
+    DiscordSocketClient discordClient,
+    DiscordRateLimitGuard rateLimit,
+    CancellationToken ct) =>
 {
     var mongoUp = await store.PingAsync(TimeSpan.FromSeconds(3), ct);
     long pending = 0;
@@ -64,6 +73,12 @@ app.MapGet("/healthz", async (MongoStore store, JobQueue queue, IOptions<LineOpt
         queuePending = pending,
         lineChannelId = line.Value.ChannelId,
         llm = classifier.DisplayName,
+        discord = new
+        {
+            state = discordClient.ConnectionState.ToString(),
+            rateLimitedUntil = rateLimit.IsBlocked ? rateLimit.BlockedUntil : (DateTimeOffset?)null,
+            lastRetryAfterSeconds = rateLimit.LastRetryAfterSeconds
+        },
         utc = DateTime.UtcNow
     });
 });

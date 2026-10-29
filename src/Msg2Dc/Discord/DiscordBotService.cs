@@ -1,4 +1,5 @@
 using Discord;
+using Discord.Net;
 using Discord.WebSocket;
 using Microsoft.Extensions.Options;
 using Msg2Dc.Configuration;
@@ -7,32 +8,38 @@ namespace Msg2Dc.Discord;
 
 public sealed class DiscordBotService : BackgroundService
 {
-    private static readonly TimeSpan RegisterInterval = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan HealthCheckInterval = TimeSpan.FromSeconds(15);
+    private static readonly TimeSpan StormWindow = TimeSpan.FromMinutes(10);
+    private static readonly TimeSpan HealthySession = TimeSpan.FromMinutes(30);
+    private static readonly TimeSpan OfflineLimit = TimeSpan.FromMinutes(3);
+    private const int StormDisconnects = 3;
 
     private readonly DiscordSocketClient _client;
     private readonly DiscordCommandHandler _commands;
+    private readonly DiscordRateLimitGuard _guard;
     private readonly DiscordOptions _options;
     private readonly ILogger<DiscordBotService> _log;
-    private readonly SemaphoreSlim _registerLock = new(1, 1);
+
+    private readonly List<DateTime> _disconnectTimes = new();
 
     private ulong? _guildId;
-    private DateTime _registeredAt = DateTime.MinValue;
-    private bool _wired;
-
-    private int _disconnectsSinceReady;
-    private int _gatewayRateLimitHits;
-    private int _stormCount;
+    private DateTime _readySince = DateTime.MinValue;
     private DateTime _lastDisconnectedAt = DateTime.MinValue;
+    private int _stormCount;
+    private int _registered;
+    private bool _wired;
     private volatile bool _cooling;
 
     public DiscordBotService(
         DiscordSocketClient client,
         DiscordCommandHandler commands,
+        DiscordRateLimitGuard guard,
         IOptions<DiscordOptions> options,
         ILogger<DiscordBotService> log)
     {
         _client = client;
         _commands = commands;
+        _guard = guard;
         _options = options.Value;
         _log = log;
     }
@@ -60,6 +67,8 @@ public sealed class DiscordBotService : BackgroundService
         }
 
         Wire();
+
+        await _guard.LoadAsync(stoppingToken);
 
         for (var attempt = 1; !stoppingToken.IsCancellationRequested; attempt++)
         {
@@ -168,12 +177,6 @@ public sealed class DiscordBotService : BackgroundService
             _ => LogLevel.Debug
         };
 
-        if (message.Source == "Rest" &&
-            message.Message?.Contains("gateway/bot", StringComparison.OrdinalIgnoreCase) == true)
-        {
-            Interlocked.Increment(ref _gatewayRateLimitHits);
-        }
-
         _log.Log(level, message.Exception, "[Discord/{Source}] {Message}", message.Source, message.Message);
         return Task.CompletedTask;
     }
@@ -187,22 +190,36 @@ public sealed class DiscordBotService : BackgroundService
 
     private Task OnDisconnectedAsync(Exception exception)
     {
-        if (!_cooling)
+        var now = DateTime.UtcNow;
+
+        if (_readySince != DateTime.MinValue && now - _readySince >= HealthySession)
         {
-            Interlocked.Increment(ref _disconnectsSinceReady);
+            lock (_disconnectTimes)
+            {
+                _disconnectTimes.Clear();
+            }
+
+            _stormCount = 0;
         }
 
-        _lastDisconnectedAt = DateTime.UtcNow;
+        lock (_disconnectTimes)
+        {
+            _disconnectTimes.Add(now);
+            if (_disconnectTimes.Count > 30)
+            {
+                _disconnectTimes.RemoveAt(0);
+            }
+        }
+
+        _lastDisconnectedAt = now;
         _log.LogWarning(exception, "Discord gateway disconnected");
         return Task.CompletedTask;
     }
 
     private Task OnReadyAsync()
     {
-        Interlocked.Exchange(ref _disconnectsSinceReady, 0);
-        Interlocked.Exchange(ref _gatewayRateLimitHits, 0);
+        _readySince = DateTime.UtcNow;
         _lastDisconnectedAt = DateTime.MinValue;
-        _stormCount = 0;
 
         _log.LogInformation("Discord ready as {User} in {Guilds} guild(s)",
             _client.CurrentUser?.Username ?? "unknown", _client.Guilds.Count);
@@ -218,6 +235,33 @@ public sealed class DiscordBotService : BackgroundService
         return Task.CompletedTask;
     }
 
+    private async Task<bool> WaitWhileRateLimitedAsync(CancellationToken ct)
+    {
+        while (_guard.IsBlocked)
+        {
+            var wait = _guard.BlockedUntil - DateTimeOffset.UtcNow + TimeSpan.FromSeconds(5);
+            if (wait < TimeSpan.FromSeconds(1))
+            {
+                wait = TimeSpan.FromSeconds(1);
+            }
+
+            _log.LogWarning(
+                "Discord is rate limited; waiting {Minutes:F1} minute(s) before connecting",
+                wait.TotalMinutes);
+
+            try
+            {
+                await Task.Delay(wait, ct);
+            }
+            catch (OperationCanceledException)
+            {
+                return false;
+            }
+        }
+
+        return !ct.IsCancellationRequested;
+    }
+
     private async Task SuperviseAsync(CancellationToken ct)
     {
         var baseCooldown = TimeSpan.FromMinutes(Math.Max(1, _options.CooldownMinutes));
@@ -226,7 +270,9 @@ public sealed class DiscordBotService : BackgroundService
         {
             try
             {
-                await Task.Delay(TimeSpan.FromSeconds(15), ct);
+                // Wake up as soon as Discord tells us to back off, otherwise re-check every 15s.
+                await Task.WhenAny(Task.Delay(HealthCheckInterval, ct), _guard.Signal);
+                ct.ThrowIfCancellationRequested();
             }
             catch (OperationCanceledException)
             {
@@ -238,61 +284,111 @@ public sealed class DiscordBotService : BackgroundService
                 continue;
             }
 
-            var disconnects = Volatile.Read(ref _disconnectsSinceReady);
-            var rateLimitHits = Volatile.Read(ref _gatewayRateLimitHits);
-            var offlineTooLong = _client.ConnectionState == ConnectionState.Disconnected
-                                 && _lastDisconnectedAt != DateTime.MinValue
-                                 && DateTime.UtcNow - _lastDisconnectedAt > TimeSpan.FromMinutes(3);
+            PruneDisconnects();
 
-            if (disconnects < 3 && rateLimitHits < 2 && !offlineTooLong)
+            TimeSpan wait;
+            string reason;
+
+            if (_guard.IsBlocked && _client.ConnectionState != ConnectionState.Connected)
+            {
+                wait = _guard.BlockedUntil - DateTimeOffset.UtcNow + TimeSpan.FromSeconds(5);
+                reason = $"Discord rate limit ({_guard.LastRetryAfterSeconds:F0}s retry-after)";
+            }
+            else if (DisconnectsInWindow() >= StormDisconnects || HasBeenOfflineTooLong())
+            {
+                _stormCount++;
+                var minutes = Math.Min(120, baseCooldown.TotalMinutes * Math.Pow(2, _stormCount - 1));
+                wait = TimeSpan.FromMinutes(minutes);
+                reason = $"reconnect storm ({DisconnectsInWindow()} disconnects in 10 minutes)";
+            }
+            else
             {
                 continue;
             }
 
+            if (wait < TimeSpan.FromSeconds(1))
+            {
+                wait = TimeSpan.FromSeconds(1);
+            }
+
             _cooling = true;
-            _stormCount++;
-            var minutes = Math.Min(120, baseCooldown.TotalMinutes * Math.Pow(2, _stormCount - 1));
-            var wait = TimeSpan.FromMinutes(minutes);
-
-            _log.LogError(
-                "Discord reconnect storm ({Disconnects} disconnects, {RateLimitHits} gateway/bot rate-limit hits); " +
-                "stopping the client for {Minutes} minute(s) so the gateway rate-limit bucket can reset",
-                disconnects, rateLimitHits, (int)minutes);
-
             try
             {
-                await _client.StopAsync();
-            }
-            catch (Exception ex)
-            {
-                _log.LogWarning(ex, "Discord stop during cooldown failed");
-            }
+                _log.LogError(
+                    "Stopping the Discord client for {Minutes:F0} minute(s) so the rate-limit bucket can reset: {Reason}",
+                    wait.TotalMinutes, reason);
 
-            try
-            {
+                try
+                {
+                    await _client.StopAsync();
+                }
+                catch (Exception ex)
+                {
+                    _log.LogWarning(ex, "Discord stop during cooldown failed");
+                }
+
                 await Task.Delay(wait, ct);
+
+                lock (_disconnectTimes)
+                {
+                    _disconnectTimes.Clear();
+                }
+
+                _readySince = DateTime.MinValue;
+
+                if (_guard.IsBlocked)
+                {
+                    _log.LogWarning(
+                        "Discord rate limit was extended; staying offline until {Until:u}",
+                        _guard.BlockedUntil);
+
+                    if (!await WaitWhileRateLimitedAsync(ct))
+                    {
+                        return;
+                    }
+                }
+
+                await _client.StartAsync();
+                _log.LogInformation("Discord client restarted after {Minutes:F0} minute(s)", wait.TotalMinutes);
             }
             catch (OperationCanceledException)
             {
                 return;
             }
-
-            Interlocked.Exchange(ref _disconnectsSinceReady, 0);
-            Interlocked.Exchange(ref _gatewayRateLimitHits, 0);
-
-            try
-            {
-                await _client.StartAsync();
-                _log.LogInformation("Discord client restarted after {Minutes} minute cooldown", (int)minutes);
-            }
             catch (Exception ex)
             {
                 _log.LogError(ex, "Discord restart after cooldown failed");
             }
-
-            _cooling = false;
+            finally
+            {
+                _cooling = false;
+            }
         }
     }
+
+    private void PruneDisconnects()
+    {
+        var cutoff = DateTime.UtcNow - StormWindow;
+        lock (_disconnectTimes)
+        {
+            _disconnectTimes.RemoveAll(t => t < cutoff);
+        }
+    }
+
+    private int DisconnectsInWindow()
+    {
+        var cutoff = DateTime.UtcNow - StormWindow;
+        lock (_disconnectTimes)
+        {
+            return _disconnectTimes.Count(t => t >= cutoff);
+        }
+    }
+
+    private bool HasBeenOfflineTooLong() =>
+        !_guard.IsBlocked
+        && _client.ConnectionState == ConnectionState.Disconnected
+        && _lastDisconnectedAt != DateTime.MinValue
+        && DateTime.UtcNow - _lastDisconnectedAt > OfflineLimit;
 
     private async Task OnSlashCommandAsync(SocketSlashCommand command)
     {
@@ -312,18 +408,26 @@ public sealed class DiscordBotService : BackgroundService
         }
     }
 
+    /// <summary>
+    /// Registers the slash commands once per process. Re-registering on every Ready
+    /// multiplied the request volume whenever the gateway reconnected.
+    /// </summary>
     private async Task RegisterCommandsAsync()
     {
-        if (_registerLock.CurrentCount == 0)
+        if (Interlocked.Exchange(ref _registered, 1) == 1)
         {
             return;
         }
 
-        await _registerLock.WaitAsync();
+        var complete = false;
+
         try
         {
-            if (DateTime.UtcNow - _registeredAt < RegisterInterval)
+            if (_guard.IsBlocked)
             {
+                _log.LogWarning(
+                    "Slash command registration skipped until {Until:u} (Discord rate limit)",
+                    _guard.BlockedUntil);
                 return;
             }
 
@@ -355,27 +459,39 @@ public sealed class DiscordBotService : BackgroundService
                     return;
                 }
 
+                var registered = 0;
                 foreach (var (name, properties) in definitions)
                 {
-                    await TryRegisterAsync(name, () => guild.CreateApplicationCommandAsync(properties));
+                    if (!await TryRegisterAsync(name, () => guild.CreateApplicationCommandAsync(properties, WriteOptions())))
+                    {
+                        return;
+                    }
+
+                    registered++;
                 }
 
-                _registeredAt = DateTime.UtcNow;
                 _log.LogInformation("Registered {Count} guild slash commands in guild {GuildId}",
-                    definitions.Count, guildId);
+                    registered, guildId);
             }
             else
             {
+                var registered = 0;
                 foreach (var (name, properties) in definitions)
                 {
-                    await TryRegisterAsync(name, () => _client.CreateGlobalApplicationCommandAsync(properties));
+                    if (!await TryRegisterAsync(name, () => _client.CreateGlobalApplicationCommandAsync(properties, WriteOptions())))
+                    {
+                        return;
+                    }
+
+                    registered++;
                 }
 
-                _registeredAt = DateTime.UtcNow;
                 _log.LogInformation(
                     "Registered {Count} global slash commands (Discord may take up to an hour to show them)",
-                    definitions.Count);
+                    registered);
             }
+
+            complete = true;
         }
         catch (Exception ex)
         {
@@ -383,21 +499,41 @@ public sealed class DiscordBotService : BackgroundService
         }
         finally
         {
-            _registerLock.Release();
+            if (!complete)
+            {
+                // Retried by the next Ready, which only happens after the rate limit cleared.
+                Interlocked.Exchange(ref _registered, 0);
+            }
         }
     }
 
-    private async Task TryRegisterAsync(string name, Func<Task> register)
+    private async Task<bool> TryRegisterAsync(string name, Func<Task> register)
     {
         try
         {
             await register();
+            return true;
+        }
+        catch (RateLimitedException)
+        {
+            _log.LogWarning(
+                "Slash command /{Command} hit a Discord rate limit; aborting this batch until the bucket resets",
+                name);
+            return false;
         }
         catch (Exception ex)
         {
             _log.LogError(ex, "Failed to register slash command /{Command}", name);
+            return true;
         }
     }
+
+    /// <summary>
+    /// Never let Discord.Net retry a rate-limited request: with the default
+    /// RetryMode.AlwaysRetry it resends in a tight loop and escalates the ban.
+    /// </summary>
+    private static RequestOptions WriteOptions() =>
+        new() { RetryMode = RetryMode.Retry502 };
 
     private static string BuildInviteUrl(ulong clientId, ulong? guildId)
     {

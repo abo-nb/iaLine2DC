@@ -141,6 +141,14 @@ public sealed class JobDoc
     public DateTime CreatedAt { get; set; }
 }
 
+public sealed class SystemStateDoc
+{
+    public ObjectId Id { get; set; }
+    public string Key { get; set; } = "";
+    public DateTime BlockedUntil { get; set; }
+    public DateTime UpdatedAt { get; set; }
+}
+
 public sealed class LlmLogDoc
 {
     public ObjectId Id { get; set; }
