@@ -433,6 +433,9 @@ public sealed class DiscordBotService : BackgroundService
 
             var definitions = DiscordCommands.Build();
 
+            using var batchCancel = new CancellationTokenSource();
+            _ = CancelWhenRateLimitedAsync(batchCancel);
+
             var targetGuildId = _guildId;
             if (targetGuildId is null && _client.Guilds.Count == 1)
             {
@@ -462,7 +465,7 @@ public sealed class DiscordBotService : BackgroundService
                 var registered = 0;
                 foreach (var (name, properties) in definitions)
                 {
-                    if (!await TryRegisterAsync(name, () => guild.CreateApplicationCommandAsync(properties, WriteOptions())))
+                    if (!await TryRegisterAsync(name, () => guild.CreateApplicationCommandAsync(properties, WriteOptions(batchCancel.Token))))
                     {
                         return;
                     }
@@ -478,7 +481,7 @@ public sealed class DiscordBotService : BackgroundService
                 var registered = 0;
                 foreach (var (name, properties) in definitions)
                 {
-                    if (!await TryRegisterAsync(name, () => _client.CreateGlobalApplicationCommandAsync(properties, WriteOptions())))
+                    if (!await TryRegisterAsync(name, () => _client.CreateGlobalApplicationCommandAsync(properties, WriteOptions(batchCancel.Token))))
                     {
                         return;
                     }
@@ -507,6 +510,32 @@ public sealed class DiscordBotService : BackgroundService
         }
     }
 
+    /// <summary>
+    /// Discord.Net keeps resending a 429'd request in a tight loop when the response
+    /// carries no parsable reset time, so cancel our own batch as soon as the guard
+    /// sees a rate limit. The in-flight request then aborts on its next iteration.
+    /// </summary>
+    private async Task CancelWhenRateLimitedAsync(CancellationTokenSource batchCancel)
+    {
+        try
+        {
+            var signal = _guard.Signal;
+            await Task.WhenAny(signal, Task.Delay(TimeSpan.FromMinutes(1)));
+            if (signal.IsCompleted)
+            {
+                batchCancel.Cancel();
+            }
+        }
+        catch (ObjectDisposedException)
+        {
+            // The batch finished first.
+        }
+        catch (Exception ex)
+        {
+            _log.LogDebug(ex, "Stopping the command-registration batch failed");
+        }
+    }
+
     private async Task<bool> TryRegisterAsync(string name, Func<Task> register)
     {
         try
@@ -521,19 +550,31 @@ public sealed class DiscordBotService : BackgroundService
                 name);
             return false;
         }
+        catch (Exception ex) when (_guard.IsBlocked)
+        {
+            _log.LogWarning(
+                "Stopped registering slash commands at /{Command}: Discord rate limit is active ({Message})",
+                name, ex.Message);
+            return false;
+        }
         catch (Exception ex)
         {
             _log.LogError(ex, "Failed to register slash command /{Command}", name);
-            return true;
+
+            // A timeout or any other failure right after a 429 means the bucket is still
+            // hot; stop the batch instead of letting every command hammer it in turn.
+            return !_guard.IsBlocked;
         }
     }
 
     /// <summary>
     /// Never let Discord.Net retry a rate-limited request: with the default
     /// RetryMode.AlwaysRetry it resends in a tight loop and escalates the ban.
+    /// The timeout is the only thing that stops the loop when a 429 carries no
+    /// parsable reset time, so keep it short.
     /// </summary>
-    private static RequestOptions WriteOptions() =>
-        new() { RetryMode = RetryMode.Retry502 };
+    private static RequestOptions WriteOptions(CancellationToken ct) =>
+        new() { RetryMode = RetryMode.Retry502, Timeout = 15000, CancelToken = ct };
 
     private static string BuildInviteUrl(ulong clientId, ulong? guildId)
     {

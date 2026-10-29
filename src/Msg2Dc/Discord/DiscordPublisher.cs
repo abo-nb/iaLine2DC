@@ -251,5 +251,5 @@ public sealed class DiscordPublisher : IDiscordPublisher
     /// so the caller (and the rate-limit guard) can back off properly.
     /// </summary>
     private static RequestOptions WriteOptions(CancellationToken ct) =>
-        new() { RetryMode = RetryMode.Retry502, CancelToken = ct };
+        new() { RetryMode = RetryMode.Retry502, Timeout = 15000, CancelToken = ct };
 }

@@ -187,7 +187,7 @@ curl -i -X POST localhost:5000/line/webhook \
 |---|---|
 | `DiscordSocketConfig.GatewayHost = "wss://gateway.discord.gg"` | 完全不请求 `GET /gateway/bot`，启动路径不再碰那个小桶 |
 | `DefaultRatelimitCallback` → `DiscordRateLimitGuard` | 拿到真实 `Retry-After`，立刻唤醒监督循环 |
-| 自己发起的 REST 调用用 `RetryMode.Retry502` | 429 直接抛 `RateLimitedException`，不再紧循环 |
+| 自己发起的 REST 调用用 `RetryMode.Retry502` + `Timeout` + 取消令牌 | 429 直接抛 `RateLimitedException`；遇到解析不出 reset 时间的 429，靠 15 秒超时和「guard 一报警就取消这批请求」止损 |
 | 熔断改成 10 分钟滑动窗口，`Ready` 不再清零 | 「连上→被踢→重连」能被正确统计 |
 | 限流截止时间写进 Mongo `systemState` | 重启/部署后不会立刻再撞上去 |
 
