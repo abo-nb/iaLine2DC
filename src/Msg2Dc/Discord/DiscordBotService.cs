@@ -207,6 +207,13 @@ public sealed class DiscordBotService : BackgroundService
         _log.LogInformation("Discord ready as {User} in {Guilds} guild(s)",
             _client.CurrentUser?.Username ?? "unknown", _client.Guilds.Count);
 
+        if (_client.CurrentUser is { } self)
+        {
+            _log.LogInformation(
+                "Discord invite link (open as a server admin to add the bot): {InviteUrl}",
+                BuildInviteUrl(self.Id, _guildId ?? (_client.Guilds.Count == 1 ? _client.Guilds.First().Id : null)));
+        }
+
         _ = Task.Run(RegisterCommandsAsync);
         return Task.CompletedTask;
     }
@@ -322,7 +329,16 @@ public sealed class DiscordBotService : BackgroundService
 
             var definitions = DiscordCommands.Build();
 
-            if (_guildId is ulong guildId)
+            var targetGuildId = _guildId;
+            if (targetGuildId is null && _client.Guilds.Count == 1)
+            {
+                targetGuildId = _client.Guilds.First().Id;
+                _log.LogInformation(
+                    "Discord:GuildId is empty; using the only joined guild {GuildId} for command registration",
+                    targetGuildId);
+            }
+
+            if (targetGuildId is ulong guildId)
             {
                 var guild = _client.GetGuild(guildId);
                 if (guild is null)
