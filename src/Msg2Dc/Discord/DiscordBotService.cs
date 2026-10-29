@@ -68,6 +68,13 @@ public sealed class DiscordBotService : BackgroundService
                     await _client.LoginAsync(TokenType.Bot, _options.Token);
                 }
 
+                if (_client.CurrentUser is { } self)
+                {
+                    _log.LogInformation(
+                        "Discord invite link (open as a server admin to add the bot): {InviteUrl}",
+                        BuildInviteUrl(self.Id, _guildId));
+                }
+
                 await _client.StartAsync();
                 _log.LogInformation("Discord gateway started");
                 break;
@@ -317,7 +324,9 @@ public sealed class DiscordBotService : BackgroundService
 
                 if (guild is null)
                 {
-                    _log.LogWarning("Guild {GuildId} is not available; slash commands were not registered", guildId);
+                    _log.LogWarning(
+                        "Guild {GuildId} is not available; slash commands were not registered. Invite the bot first: {InviteUrl}",
+                        guildId, BuildInviteUrl(_client.CurrentUser?.Id ?? 0, guildId));
                     return;
                 }
 
@@ -363,6 +372,13 @@ public sealed class DiscordBotService : BackgroundService
         {
             _log.LogError(ex, "Failed to register slash command /{Command}", name);
         }
+    }
+
+    private static string BuildInviteUrl(ulong clientId, ulong? guildId)
+    {
+        const long permissions = 1024 | 2048 | 8192 | 16384 | 32768 | 65536;
+        var url = $"https://discord.com/oauth2/authorize?client_id={clientId}&permissions={permissions}&scope=bot%20applications.commands";
+        return guildId is null ? url : $"{url}&guild_id={guildId}&disable_guild_select=true";
     }
 
     private static ulong? ParseGuildId(string value) =>
