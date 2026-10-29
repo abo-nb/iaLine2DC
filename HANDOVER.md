@@ -191,7 +191,7 @@ curl -i -X POST localhost:5000/line/webhook \
 | 熔断改成 10 分钟滑动窗口，`Ready` 不再清零 | 「连上→被踢→重连」能被正确统计 |
 | 限流截止时间写进 Mongo `systemState` | 重启/部署后不会立刻再撞上去 |
 
-**现在的行为**：网关连接与 REST 限流解耦；REST 被限流时记录截止时间并跳过指令注册，网关保持在线。`/healthz` 新增 `discord.state` / `discord.rateLimitedUntil` / `discord.lastRetryAfterSeconds`。
+**现在的行为**：网关连接与 REST 限流解耦；REST 被限流时记录截止时间并跳过指令注册，网关保持在线。被跳过的注册会在限流解除后按 1/5/15 分钟退避重试（最多 3 次），不会每分钟重复写。`/healthz` 新增 `discord.state` / `discord.rateLimitedUntil` / `discord.lastRetryAfterSeconds`。
 
 **如果再次出现**：先看 `/healthz` 的 `discord.rateLimitedUntil`，再对照 Render 日志里的 `[Discord/Rest] Rate limit triggered` 是哪个 route；只要日志不再出现同一行每 10ms 重复，就说明紧循环没有回来。
 
