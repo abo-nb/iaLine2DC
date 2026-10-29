@@ -1,0 +1,16 @@
+{
+  "destination": "Ubot",
+  "events": [
+    {
+      "type": "message",
+      "webhookEventId": "evt-zh-001",
+      "timestamp": 1761750000000,
+      "source": { "type": "group", "groupId": "CtestGroup", "userId": "UtestUser" },
+      "message": {
+        "id": "msg-zh-001",
+        "type": "text",
+        "text": "明天第一节数学小考，范围 3-1 到 3-3，带计算器"
+      }
+    }
+  ]
+}

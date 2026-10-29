@@ -1,0 +1,97 @@
+# ─────────────────────────────────────────────────────────────
+#  Render Blueprint：IA114Msg2DC（LINE 收信 → LLM 整理 → Atlas → Discord）
+#
+#  三个与常见草稿不同的字段，都是有原因的：
+#
+#  1. `type: web`（不是 worker）
+#     Render 免费层只有 Web Service。Worker 要付费，而且 worker 不监听端口；
+#     免费层的 Web Service 必须监听 HTTP 端口。本服务同时跑 webhook 与 Bot。
+#
+#  2. `runtime: docker`（不是 `env: docker`）
+#     Blueprint 规格的字段名是 `runtime`；写 `env` 不会生效。
+#
+#  3. `healthCheckPath: /healthz`
+#     程序提供的端点，回 200 JSON（mongo / 队列 / LLM 状态）。
+#
+#  ⚠️ 免费层没有持久磁盘：容器重启即清空。
+#     所以数据放 MongoDB Atlas（M0 免费层够用），附件放 Discord 资料库频道。
+#     代码里不写任何本地文件，这一点已经按此设计。
+#
+#  ⚠️ 不要自己设 `PORT`：Render 会注入，程序读它并绑 0.0.0.0。写死反而会冲突。
+# ─────────────────────────────────────────────────────────────
+services:
+  - type: web
+    name: ia114-msg2dc
+    runtime: docker
+    plan: free
+    region: singapore # 选离你最近的：singapore / oregon / frankfurt / ohio
+
+    # 从 Dashboard 创建 Blueprint 时可以直接选仓库，这里不写死；
+    # 想固定到某个仓库就取消下面这行注释。
+    # repo: https://github.com/<你的账号>/IA114Msg2DC.git
+
+    # Dockerfile 在仓库根目录
+    dockerfilePath: Dockerfile
+    dockerContext: .
+
+    healthCheckPath: /healthz
+    autoDeploy: true
+
+    envVars:
+      # ── LINE（必填）─────────────────────────────────────
+      # Channel ID 不参与鉴权，用于启动自检与 /status 展示，但仍需填对
+      - key: Line__ChannelId
+        sync: false
+      # Secret 用于 webhook 验签，泄漏等于别人能伪造消息
+      - key: Line__ChannelSecret
+        sync: false
+      # Access Token 用于下载附件、取群成员昵称
+      - key: Line__ChannelAccessToken
+        sync: false
+
+      # ── Discord（必填）──────────────────────────────────
+      # 不给 token 时程序会打一行日志后跳过 Bot，不会崩，但也就收不到指令
+      - key: Discord__Enabled
+        value: "true"
+      - key: Discord__Token
+        sync: false
+      - key: Discord__GuildId
+        sync: false
+      # 管理员 Discord 用户 ID，逗号分隔。只有这些人能用配置类指令
+      - key: AdminIds
+        sync: false
+
+      # ── MongoDB Atlas（必填）────────────────────────────
+      # 免费层没有持久磁盘，这是唯一的持久化存储
+      - key: Mongo__ConnectionString
+        sync: false
+      - key: Mongo__Database
+        value: msg2dc
+
+      # ── LLM（两家都配好，用 /set-model 切换）──────────────
+      # 模型名不在这里：它存在数据库里，改模型只要一条 Discord 指令，不用重新部署
+      - key: Llm__OpenAi__BaseUrl
+        value: https://api.openai.com/v1
+      - key: Llm__OpenAi__ApiKey
+        sync: false
+      - key: Llm__Google__BaseUrl
+        value: https://generativelanguage.googleapis.com
+      - key: Llm__Google__ApiKey
+        sync: false
+
+      # ── 收信参数（选填）─────────────────────────────────
+      # 同一个人 30 秒内的连续发言合并成一段再送 LLM，减少碎片与 token
+      - key: Pipeline__CoalesceSeconds
+        value: "30"
+      - key: Pipeline__WorkerCount
+        value: "2"
+
+      # ── 防休眠（重要）───────────────────────────────────
+      # 免费层闲置 15 分钟休眠，冷启动约 1 分钟；休眠期间 Discord 指令收不到。
+      # 程序每 N 分钟请求自己的 /healthz（自动读 RENDER_EXTERNAL_URL，不用填 APP_URL）。
+      # 设 0 可关闭。注意免费额度每月 750 小时 ≈ 31 天，刚好够一个常开服务。
+      - key: KEEP_ALIVE_MINUTES
+        value: "10"
+
+      - key: ASPNETCORE_ENVIRONMENT
+        value: Production
