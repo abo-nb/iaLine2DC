@@ -26,9 +26,8 @@ services:
     plan: free
     region: singapore # 选离你最近的：singapore / oregon / frankfurt / ohio
 
-    # 从 Dashboard 创建 Blueprint 时可以直接选仓库，这里不写死；
-    # 想固定到某个仓库就取消下面这行注释。
-    # repo: https://github.com/<你的账号>/IA114Msg2DC.git
+    # 仓库地址（从 Dashboard 建立 Blueprint 时也可直接选仓库）
+    repo: https://github.com/abo-nb/iaLine2DC.git
 
     # Dockerfile 在仓库根目录
     dockerfilePath: Dockerfile
