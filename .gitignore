@@ -2,7 +2,8 @@ bin/
 obj/
 data/
 .tools/
-.env
+.env*
+!.env.example
 *.user
 *.suo
 TestResults/

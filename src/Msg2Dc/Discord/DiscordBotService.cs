@@ -19,6 +19,10 @@ public sealed class DiscordBotService : BackgroundService
     private DateTime _registeredAt = DateTime.MinValue;
     private bool _wired;
 
+    private int _disconnectsSinceReady;
+    private int _gatewayRateLimitHits;
+    private volatile bool _cooling;
+
     public DiscordBotService(
         DiscordSocketClient client,
         DiscordCommandHandler commands,
@@ -91,13 +95,7 @@ public sealed class DiscordBotService : BackgroundService
             }
         }
 
-        try
-        {
-            await Task.Delay(Timeout.Infinite, stoppingToken);
-        }
-        catch (OperationCanceledException)
-        {
-        }
+        await SuperviseAsync(stoppingToken);
 
         Unwire();
 
@@ -161,6 +159,12 @@ public sealed class DiscordBotService : BackgroundService
             _ => LogLevel.Debug
         };
 
+        if (message.Source == "Rest" &&
+            message.Message?.Contains("gateway/bot", StringComparison.OrdinalIgnoreCase) == true)
+        {
+            Interlocked.Increment(ref _gatewayRateLimitHits);
+        }
+
         _log.Log(level, message.Exception, "[Discord/{Source}] {Message}", message.Source, message.Message);
         return Task.CompletedTask;
     }
@@ -173,17 +177,98 @@ public sealed class DiscordBotService : BackgroundService
 
     private Task OnDisconnectedAsync(Exception exception)
     {
-        _log.LogWarning(exception, "Discord gateway disconnected; the client reconnects automatically");
+        if (!_cooling)
+        {
+            Interlocked.Increment(ref _disconnectsSinceReady);
+        }
+
+        _log.LogWarning(exception, "Discord gateway disconnected");
         return Task.CompletedTask;
     }
 
     private Task OnReadyAsync()
     {
+        Interlocked.Exchange(ref _disconnectsSinceReady, 0);
+        Interlocked.Exchange(ref _gatewayRateLimitHits, 0);
+
         _log.LogInformation("Discord ready as {User} in {Guilds} guild(s)",
             _client.CurrentUser?.Username ?? "unknown", _client.Guilds.Count);
 
         _ = Task.Run(RegisterCommandsAsync);
         return Task.CompletedTask;
+    }
+
+    private async Task SuperviseAsync(CancellationToken ct)
+    {
+        var baseCooldown = TimeSpan.FromMinutes(Math.Max(1, _options.CooldownMinutes));
+        var storms = 0;
+
+        while (!ct.IsCancellationRequested)
+        {
+            try
+            {
+                await Task.Delay(TimeSpan.FromSeconds(15), ct);
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+
+            if (_cooling)
+            {
+                continue;
+            }
+
+            var disconnects = Volatile.Read(ref _disconnectsSinceReady);
+            var rateLimitHits = Volatile.Read(ref _gatewayRateLimitHits);
+            if (disconnects < 3 && rateLimitHits < 2)
+            {
+                continue;
+            }
+
+            _cooling = true;
+            storms++;
+            var minutes = Math.Min(120, baseCooldown.TotalMinutes * Math.Pow(2, storms - 1));
+            var wait = TimeSpan.FromMinutes(minutes);
+
+            _log.LogError(
+                "Discord reconnect storm ({Disconnects} disconnects, {RateLimitHits} gateway/bot rate-limit hits); " +
+                "stopping the client for {Minutes} minute(s) so the gateway rate-limit bucket can reset",
+                disconnects, rateLimitHits, (int)minutes);
+
+            try
+            {
+                await _client.StopAsync();
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarning(ex, "Discord stop during cooldown failed");
+            }
+
+            try
+            {
+                await Task.Delay(wait, ct);
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+
+            Interlocked.Exchange(ref _disconnectsSinceReady, 0);
+            Interlocked.Exchange(ref _gatewayRateLimitHits, 0);
+
+            try
+            {
+                await _client.StartAsync();
+                _log.LogInformation("Discord client restarted after {Minutes} minute cooldown", (int)minutes);
+            }
+            catch (Exception ex)
+            {
+                _log.LogError(ex, "Discord restart after cooldown failed");
+            }
+
+            _cooling = false;
+        }
     }
 
     private async Task OnSlashCommandAsync(SocketSlashCommand command)

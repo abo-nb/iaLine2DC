@@ -12,6 +12,7 @@ public sealed class DiscordOptions
     public bool Enabled { get; set; }
     public string Token { get; set; } = "";
     public string GuildId { get; set; } = "";
+    public int CooldownMinutes { get; set; } = 10;
 }
 
 public sealed class OpenAiOptions
