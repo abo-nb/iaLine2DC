@@ -76,7 +76,7 @@ public sealed class DiscordRateLimitGuard
             if (_state.Restore(until))
             {
                 _log.LogWarning(
-                    "Discord is still rate limited until {Until:u}; waiting before connecting",
+                    "Discord REST is still rate limited until {Until:u}; REST writes will be skipped",
                     until);
             }
         }

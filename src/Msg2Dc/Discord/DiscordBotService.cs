@@ -428,6 +428,7 @@ public sealed class DiscordBotService : BackgroundService
                 _log.LogWarning(
                     "Slash command registration skipped until {Until:u} (Discord rate limit)",
                     _guard.BlockedUntil);
+                ScheduleRegistrationAfterBlock();
                 return;
             }
 
@@ -515,8 +516,7 @@ public sealed class DiscordBotService : BackgroundService
     /// carries no parsable reset time, so cancel our own batch as soon as the guard
     /// sees a rate limit. The in-flight request then aborts on its next iteration.
     /// </summary>
-    private async Task CancelWhenRateLimitedAsync(CancellationTokenSource batchCancel)
-    {
+    private async Task CancelWhenRateLimitedAsync(CancellationTokenSource batchCancel)    {
         try
         {
             var signal = _guard.Signal;
@@ -534,6 +534,32 @@ public sealed class DiscordBotService : BackgroundService
         {
             _log.LogDebug(ex, "Stopping the command-registration batch failed");
         }
+    }
+
+    /// <summary>
+    /// Registration was skipped because of a known rate limit; try again once it expires
+    /// instead of waiting for the next gateway reconnect.
+    /// </summary>
+    private void ScheduleRegistrationAfterBlock()
+    {
+        var wait = _guard.BlockedUntil - DateTimeOffset.UtcNow + TimeSpan.FromSeconds(10);
+        if (wait < TimeSpan.FromSeconds(10))
+        {
+            wait = TimeSpan.FromSeconds(10);
+        }
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(wait);
+                await RegisterCommandsAsync();
+            }
+            catch (Exception ex)
+            {
+                _log.LogDebug(ex, "Delayed slash command registration failed");
+            }
+        });
     }
 
     private async Task<bool> TryRegisterAsync(string name, Func<Task> register)

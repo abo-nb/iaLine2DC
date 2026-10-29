@@ -74,6 +74,7 @@ public sealed class RateLimitState
             }
 
             _blockedUntil = until;
+            _lastRetryAfterSeconds = Math.Max(0, (until - DateTimeOffset.UtcNow).TotalSeconds);
         }
 
         return true;
