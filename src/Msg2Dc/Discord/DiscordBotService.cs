@@ -428,7 +428,7 @@ public sealed class DiscordBotService : BackgroundService
                 _log.LogWarning(
                     "Slash command registration skipped until {Until:u} (Discord rate limit)",
                     _guard.BlockedUntil);
-                ScheduleRegistrationAfterBlock();
+                ScheduleRegistrationRetry();
                 return;
             }
 
@@ -537,12 +537,15 @@ public sealed class DiscordBotService : BackgroundService
     }
 
     /// <summary>
-    /// Registration was skipped because of a known rate limit; try again once it expires
+    /// Registration was skipped or aborted because of a rate limit; try again later
     /// instead of waiting for the next gateway reconnect.
     /// </summary>
-    private void ScheduleRegistrationAfterBlock()
+    private void ScheduleRegistrationRetry()
     {
-        var wait = _guard.BlockedUntil - DateTimeOffset.UtcNow + TimeSpan.FromSeconds(10);
+        var wait = _guard.IsBlocked
+            ? _guard.BlockedUntil - DateTimeOffset.UtcNow + TimeSpan.FromSeconds(10)
+            : TimeSpan.FromMinutes(1);
+
         if (wait < TimeSpan.FromSeconds(10))
         {
             wait = TimeSpan.FromSeconds(10);
@@ -574,6 +577,7 @@ public sealed class DiscordBotService : BackgroundService
             _log.LogWarning(
                 "Slash command /{Command} hit a Discord rate limit; aborting this batch until the bucket resets",
                 name);
+            ScheduleRegistrationRetry();
             return false;
         }
         catch (Exception ex) when (_guard.IsBlocked)
@@ -581,6 +585,7 @@ public sealed class DiscordBotService : BackgroundService
             _log.LogWarning(
                 "Stopped registering slash commands at /{Command}: Discord rate limit is active ({Message})",
                 name, ex.Message);
+            ScheduleRegistrationRetry();
             return false;
         }
         catch (Exception ex)
