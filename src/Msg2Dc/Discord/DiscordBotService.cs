@@ -27,6 +27,7 @@ public sealed class DiscordBotService : BackgroundService
     private DateTime _lastDisconnectedAt = DateTime.MinValue;
     private int _stormCount;
     private int _registered;
+    private int _registrationRetries;
     private bool _wired;
     private volatile bool _cooling;
 
@@ -496,6 +497,7 @@ public sealed class DiscordBotService : BackgroundService
             }
 
             complete = true;
+            Interlocked.Exchange(ref _registrationRetries, 0);
         }
         catch (Exception ex)
         {
@@ -542,9 +544,16 @@ public sealed class DiscordBotService : BackgroundService
     /// </summary>
     private void ScheduleRegistrationRetry()
     {
+        var attempt = Interlocked.Increment(ref _registrationRetries);
+        if (attempt > 3)
+        {
+            _log.LogWarning("Gave up re-registering slash commands for this session; they will be registered on the next restart");
+            return;
+        }
+
         var wait = _guard.IsBlocked
             ? _guard.BlockedUntil - DateTimeOffset.UtcNow + TimeSpan.FromSeconds(10)
-            : TimeSpan.FromMinutes(1);
+            : TimeSpan.FromMinutes(attempt == 1 ? 1 : attempt == 2 ? 5 : 15);
 
         if (wait < TimeSpan.FromSeconds(10))
         {
