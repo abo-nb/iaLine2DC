@@ -195,6 +195,23 @@ curl -i -X POST localhost:5000/line/webhook \
 
 **如果再次出现**：先看 `/healthz` 的 `discord.rateLimitedUntil`，再对照 Render 日志里的 `[Discord/Rest] Rate limit triggered` 是哪个 route；只要日志不再出现同一行每 10ms 重复，就说明紧循环没有回来。
 
+### 7.1 第二层原因：Render 的出口 IP 被 Cloudflare 拦（2026-10-30）
+
+紧循环修好后，机器人能上线，但斜杠指令仍然回「该应用程序未响应」。查明：
+
+- 交互回调 `POST interactions/.../callback` 收到的是 **Cloudflare 的 HTML 429**，不是 Discord 的 JSON；
+- `/diag/discord`（新加的诊断端点）显示 Render **singapore** 和 **oregon** 的出口 IP 对 `discord.com` 一律返回 `429 / server: cloudflare / error code: 1015`，**连不带 token 的 `GET /api/v10/gateway` 都是 429**；
+- 同一个 token 从本地家用 IP 请求同一个路由是 200 / 400，完全正常；
+- 换到 **frankfurt** 后出口 IP 变了，`/api/v10/gateway` 立刻 200，`Registered 17 guild slash commands` 成功。
+
+结论：**Cloudflare 1015 是 IP 级封禁**，和 token、代码无关。Render 免费层的出站 IP 是共享的，别的租户把 IP 打脏了就会连坐。
+
+排查命令：`curl https://ialine2dc.onrender.com/diag/discord`（返回出口 IP + 对 `discord.com` 的两个探测结果）。
+
+处置：换 Render 区域（region 不能原地改，要删服务重建，名字相同才能保住 `ialine2dc.onrender.com`），然后清掉 Mongo `systemState` 里的 `discord-rate-limit` 记录，否则新实例会沿用旧 IP 的限流截止时间。
+
+> 另一个陷阱：注册指令时如果去掉 `RetryRatelimit`，Discord.Net 的**客户端桶**会直接抛异常，17 条指令只能注册第一条。正确配置是「允许等客户端桶 + guard 一报警就取消整批」。
+
 ---
 
 ## 8. 已知问题 / 待办
@@ -240,7 +257,7 @@ curl -i -X POST localhost:5000/line/webhook \
 | Bot | `114资应喵`，client id `1565362945213603860` |
 | LINE Channel ID | `2012283968` |
 | 数据库 | Atlas，库名 `msg2dc` |
-| Render 计划 | Free：15 分钟无流量休眠，月 750 实例小时，磁盘临时 |
+| Render | 服务 `iaLine2DC`（`srv-dbi78k0m7kps73c3gehg`），区域 **frankfurt**，计划 Free |
 
 ---
 

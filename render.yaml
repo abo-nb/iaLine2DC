@@ -24,7 +24,7 @@ services:
     name: ia114-msg2dc
     runtime: docker
     plan: free
-    region: singapore # 选离你最近的：singapore / oregon / frankfurt / ohio
+    region: frankfurt # singapore/oregon 的出口 IP 被 Cloudflare 1015 拦过，见 HANDOVER 第 7 节
 
     # 仓库地址（从 Dashboard 建立 Blueprint 时也可直接选仓库）
     repo: https://github.com/abo-nb/iaLine2DC.git
