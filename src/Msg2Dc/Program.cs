@@ -135,4 +135,43 @@ app.MapPost("/line/webhook", async (
 
 app.MapGet("/", () => Results.Redirect("/healthz"));
 
+app.MapGet("/diag/discord", async (CancellationToken ct) =>
+{
+    using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
+
+    string egressIp;
+    try
+    {
+        egressIp = (await http.GetStringAsync("https://api.ipify.org", ct)).Trim();
+    }
+    catch (Exception ex)
+    {
+        egressIp = $"error: {ex.Message}";
+    }
+
+    var probes = new Dictionary<string, object>();
+    foreach (var url in new[] { "https://discord.com/api/v10/gateway", "https://discord.com/api/v10/users/@me" })
+    {
+        try
+        {
+            using var response = await http.GetAsync(url, ct);
+            var body = await response.Content.ReadAsStringAsync(ct);
+            probes[url] = new
+            {
+                status = (int)response.StatusCode,
+                contentType = response.Content.Headers.ContentType?.ToString(),
+                retryAfter = response.Headers.RetryAfter?.ToString(),
+                server = response.Headers.TryGetValues("server", out var server) ? string.Join(",", server) : null,
+                body = body.Length > 160 ? body[..160] : body
+            };
+        }
+        catch (Exception ex)
+        {
+            probes[url] = ex.Message;
+        }
+    }
+
+    return Results.Json(new { egressIp, probes });
+});
+
 app.Run();
