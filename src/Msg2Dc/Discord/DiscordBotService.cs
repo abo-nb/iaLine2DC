@@ -608,13 +608,18 @@ public sealed class DiscordBotService : BackgroundService
     }
 
     /// <summary>
-    /// Never let Discord.Net retry a rate-limited request: with the default
-    /// RetryMode.AlwaysRetry it resends in a tight loop and escalates the ban.
-    /// The timeout is the only thing that stops the loop when a 429 carries no
-    /// parsable reset time, so keep it short.
+    /// Registration has to wait for Discord.Net's client-side bucket between commands
+    /// (roughly one command every few seconds), so RetryRatelimit stays on here.
+    /// A real 429 is still bounded: CancelWhenRateLimitedAsync cancels the batch as soon
+    /// as the guard sees it, which aborts the library's tight retry loop.
     /// </summary>
     private static RequestOptions WriteOptions(CancellationToken ct) =>
-        new() { RetryMode = RetryMode.Retry502, Timeout = 15000, CancelToken = ct };
+        new()
+        {
+            RetryMode = RetryMode.Retry502 | RetryMode.RetryRatelimit,
+            Timeout = 15000,
+            CancelToken = ct
+        };
 
     private static string BuildInviteUrl(ulong clientId, ulong? guildId)
     {
