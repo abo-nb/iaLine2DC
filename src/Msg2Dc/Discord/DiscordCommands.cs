@@ -44,29 +44,34 @@ public static class DiscordCommands
 
             ("subscribe", (ApplicationCommandProperties)new SlashCommandBuilder()
                 .WithName("subscribe")
-                .WithDescription("将当前频道订阅到某个科目")
+                .WithDescription("把某个频道（可以是论坛）订阅到某个科目")
                 .AddOption(Text("subject", "科目名称或别名（不存在会自动创建）", required: true))
+                .AddOption(TargetChannel())
                 .Build()),
 
             ("subscribe-all", (ApplicationCommandProperties)new SlashCommandBuilder()
                 .WithName("subscribe-all")
-                .WithDescription("把当前频道（可以是论坛）订阅到全部科目，之后新增的科目也自动包含")
+                .WithDescription("把某个频道（可以是论坛）订阅到全部科目，之后新增的科目也自动包含")
+                .AddOption(TargetChannel())
                 .Build()),
 
             ("unsubscribe", (ApplicationCommandProperties)new SlashCommandBuilder()
                 .WithName("unsubscribe")
-                .WithDescription("取消当前频道对某个科目的订阅")
+                .WithDescription("取消某个频道对某个科目的订阅")
                 .AddOption(Text("subject", "科目名称或别名", required: true))
+                .AddOption(TargetChannel())
                 .Build()),
 
             ("unsubscribe-all", (ApplicationCommandProperties)new SlashCommandBuilder()
                 .WithName("unsubscribe-all")
-                .WithDescription("取消当前频道的「全部科目」订阅")
+                .WithDescription("取消某个频道的「全部科目」订阅")
+                .AddOption(TargetChannel())
                 .Build()),
 
             ("subscriptions", (ApplicationCommandProperties)new SlashCommandBuilder()
                 .WithName("subscriptions")
-                .WithDescription("查看当前频道订阅的科目")
+                .WithDescription("查看某个频道订阅了哪些科目")
+                .AddOption(TargetChannel())
                 .Build()),
 
             ("subject-add", (ApplicationCommandProperties)new SlashCommandBuilder()
@@ -161,13 +166,24 @@ public static class DiscordCommands
             .WithMinValue(min)
             .WithMaxValue(max);
 
-    private static SlashCommandOptionBuilder Channel(string name, string description, bool allowForum = false)
+    /// <summary>
+    /// Optional target for the subscription commands: forums have no message box, so the
+    /// command has to be run somewhere else and pointed at the forum channel.
+    /// </summary>
+    private static SlashCommandOptionBuilder TargetChannel() =>
+        Channel("channel", "目标频道/论坛（默认当前频道）", allowForum: true, required: false);
+
+    private static SlashCommandOptionBuilder Channel(
+        string name,
+        string description,
+        bool allowForum = false,
+        bool required = true)
     {
         var builder = new SlashCommandOptionBuilder()
             .WithName(name)
             .WithDescription(description)
             .WithType(ApplicationCommandOptionType.Channel)
-            .WithRequired(true)
+            .WithRequired(required)
             .AddChannelType(ChannelType.Text);
 
         if (allowForum)

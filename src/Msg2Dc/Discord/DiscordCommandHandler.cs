@@ -259,9 +259,10 @@ public sealed class DiscordCommandHandler
 
     private async Task SubscribeAsync(SocketSlashCommand command, CancellationToken ct)
     {
-        if (command.GuildId is not ulong guildId || command.ChannelId is not ulong channelId)
+        var target = ResolveTargetChannel(command);
+        if (target is not { } destination)
         {
-            await ReplyAsync(command, "该命令只能在服务器频道中使用。", ephemeral: true);
+            await ReplyAsync(command, "找不到目标频道，或它不是文字频道/论坛频道。", ephemeral: true);
             return;
         }
 
@@ -279,49 +280,80 @@ public sealed class DiscordCommandHandler
         }
 
         var subject = await EnsureSubjectAsync(subjectArg, ct);
-        await UpsertSubscriptionAsync(guildId, channelId, subject.Name, command.User.Id, ct);
+        await UpsertSubscriptionAsync(destination.GuildId, destination.ChannelId, subject.Name, command.User.Id, ct);
 
         var channelCount = await _store.Subscriptions.CountDocumentsAsync(
             Builders<SubscriptionDoc>.Filter.Eq(s => s.SubjectName, subject.Name),
             cancellationToken: ct);
 
         await ReplyAsync(command,
-            $"本频道已订阅科目 **{subject.Name}**，该科目共有 {channelCount} 个频道订阅。",
+            $"已把 <#{destination.ChannelId}> 订阅到科目 **{subject.Name}**，该科目共有 {channelCount} 个频道订阅。",
             ephemeral: true);
     }
 
     private async Task SubscribeAllAsync(SocketSlashCommand command, CancellationToken ct)
     {
-        if (command.GuildId is not ulong guildId || command.ChannelId is not ulong channelId)
+        var target = ResolveTargetChannel(command);
+        if (target is not { } destination)
         {
-            await ReplyAsync(command, "该命令只能在服务器频道中使用。", ephemeral: true);
+            await ReplyAsync(command, "找不到目标频道，或它不是文字频道/论坛频道。", ephemeral: true);
             return;
         }
 
-        await UpsertSubscriptionAsync(guildId, channelId, SubscriptionDoc.AllSubjects, command.User.Id, ct);
+        await UpsertSubscriptionAsync(
+            destination.GuildId,
+            destination.ChannelId,
+            SubscriptionDoc.AllSubjects,
+            command.User.Id,
+            ct);
 
         await ReplyAsync(command,
-            "本频道已订阅**全部科目**（含以后新增的科目）。论坛帖会按科目与类型自动打标签，用标签筛选即可。",
+            $"已把 <#{destination.ChannelId}> 订阅到**全部科目**（含以后新增的科目）。论坛帖会按科目与类型自动打标签，用标签筛选即可。",
             ephemeral: true);
     }
 
     private async Task UnsubscribeAllAsync(SocketSlashCommand command, CancellationToken ct)
     {
-        if (command.ChannelId is not ulong channelId)
+        var target = ResolveTargetChannel(command);
+        if (target is not { } destination)
         {
-            await ReplyAsync(command, "该命令只能在服务器频道中使用。", ephemeral: true);
+            await ReplyAsync(command, "找不到目标频道，或它不是文字频道/论坛频道。", ephemeral: true);
             return;
         }
 
         var result = await _store.Subscriptions.DeleteOneAsync(
             Builders<SubscriptionDoc>.Filter.And(
-                Builders<SubscriptionDoc>.Filter.Eq(s => s.ChannelId, channelId.ToString()),
+                Builders<SubscriptionDoc>.Filter.Eq(s => s.ChannelId, destination.ChannelId.ToString()),
                 Builders<SubscriptionDoc>.Filter.Eq(s => s.SubjectName, SubscriptionDoc.AllSubjects)),
             ct);
 
         await ReplyAsync(command,
-            result.DeletedCount > 0 ? "本频道已取消「全部科目」订阅。" : "本频道没有「全部科目」订阅。",
+            result.DeletedCount > 0
+                ? $"<#{destination.ChannelId}> 已取消「全部科目」订阅。"
+                : $"<#{destination.ChannelId}> 没有「全部科目」订阅。",
             ephemeral: true);
+    }
+
+    /// <summary>
+    /// Subscription commands act on the optional <c>channel</c> option, falling back to the
+    /// channel the command was used in. Forums have no message box, so pointing at one is
+    /// only possible through that option.
+    /// </summary>
+    private (ulong GuildId, ulong ChannelId)? ResolveTargetChannel(SocketSlashCommand command)
+    {
+        var channelId = OptionChannelId(command, "channel") ?? command.ChannelId;
+        if (channelId is not ulong id)
+        {
+            return null;
+        }
+
+        if (_client.GetChannel(id) is not SocketTextChannel and not SocketForumChannel)
+        {
+            return null;
+        }
+
+        var guildId = (_client.GetChannel(id) as SocketGuildChannel)?.Guild.Id ?? command.GuildId;
+        return guildId is ulong guild ? (guild, id) : null;
     }
 
     private Task UpsertSubscriptionAsync(
@@ -354,9 +386,10 @@ public sealed class DiscordCommandHandler
 
     private async Task UnsubscribeAsync(SocketSlashCommand command, CancellationToken ct)
     {
-        if (command.ChannelId is not ulong channelId)
+        var target = ResolveTargetChannel(command);
+        if (target is not { } destination)
         {
-            await ReplyAsync(command, "该命令只能在服务器频道中使用。", ephemeral: true);
+            await ReplyAsync(command, "找不到目标频道，或它不是文字频道/论坛频道。", ephemeral: true);
             return;
         }
 
@@ -378,36 +411,41 @@ public sealed class DiscordCommandHandler
 
         var result = await _store.Subscriptions.DeleteOneAsync(
             Builders<SubscriptionDoc>.Filter.And(
-                Builders<SubscriptionDoc>.Filter.Eq(s => s.ChannelId, channelId.ToString()),
+                Builders<SubscriptionDoc>.Filter.Eq(s => s.ChannelId, destination.ChannelId.ToString()),
                 Builders<SubscriptionDoc>.Filter.Eq(s => s.SubjectName, name)),
             ct);
 
         await ReplyAsync(command,
-            result.DeletedCount > 0 ? $"本频道已取消订阅科目 **{name}**。" : $"本频道没有订阅科目 **{name}**。",
+            result.DeletedCount > 0
+                ? $"<#{destination.ChannelId}> 已取消订阅科目 **{name}**。"
+                : $"<#{destination.ChannelId}> 没有订阅科目 **{name}**。",
             ephemeral: true);
     }
 
     private async Task SubscriptionsAsync(SocketSlashCommand command, CancellationToken ct)
     {
-        if (command.ChannelId is not ulong channelId)
+        var target = ResolveTargetChannel(command);
+        if (target is not { } destination)
         {
-            await ReplyAsync(command, "该命令只能在服务器频道中使用。", ephemeral: true);
+            await ReplyAsync(command, "找不到目标频道，或它不是文字频道/论坛频道。", ephemeral: true);
             return;
         }
 
         var subscriptions = await _store.Subscriptions
-            .Find(Builders<SubscriptionDoc>.Filter.Eq(s => s.ChannelId, channelId.ToString()))
+            .Find(Builders<SubscriptionDoc>.Filter.Eq(s => s.ChannelId, destination.ChannelId.ToString()))
             .SortBy(s => s.SubjectName)
             .ToListAsync(ct);
 
         if (subscriptions.Count == 0)
         {
-            await ReplyAsync(command, "本频道尚未订阅任何科目，使用 /subscribe 添加。", ephemeral: true);
+            await ReplyAsync(command,
+                $"<#{destination.ChannelId}> 尚未订阅任何科目，使用 /subscribe 添加。",
+                ephemeral: true);
             return;
         }
 
         var builder = new StringBuilder();
-        builder.Append("**本频道订阅的科目**\n");
+        builder.Append($"**<#{destination.ChannelId}> 订阅的科目**\n");
         foreach (var subscription in subscriptions)
         {
             var label = subscription.SubjectName == SubscriptionDoc.AllSubjects

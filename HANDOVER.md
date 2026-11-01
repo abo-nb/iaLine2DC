@@ -171,7 +171,8 @@ curl -i -X POST localhost:5000/line/webhook \
 5. 在 `#数学` 频道里打 `/subscribe 数学`；如果目标是一个论坛频道，同样在这里打，之后该科目的条目会发成论坛帖。
 6. `/set-archive #资料库`、`/set-default #未分类`（默认频道也可以选论坛）。
 7. 论坛标签：发帖时会自动套用与「科目名」「科目别名」「类型」同名的标签（比较时忽略大小写与空格，所以繁体标签名可以与「數學」这类别名对上）。论坛里没有的科目/类型标签，如果 bot 有「管理频道」权限会自动创建（上限 20 个）；没有权限时只匹配已有标签，发帖照常进行，日志里会有一条 warning。
-8. **一个论坛收全部科目**：在论坛频道里打 `/subscribe-all`，任何科目的条目都会发成该论坛的帖子，每帖按科目与类型打标签，之后靠标签筛选。`/unsubscribe-all` 取消。订阅里 `SubjectName` 存的是 `*`（`SubscriptionDoc.AllSubjects`），`/subscribe` 时填「全部 / all / *」也是同一个效果。
+8. **一个论坛收全部科目**：`/subscribe-all channel:#论坛`，任何科目的条目都会发成该论坛的帖子，每帖按科目与类型打标签，之后靠标签筛选。`/unsubscribe-all channel:#论坛` 取消。订阅里 `SubjectName` 存的是 `*`（`SubscriptionDoc.AllSubjects`），`/subscribe` 时填「全部 / all / *」也是同一个效果。
+   - **论坛频道没有输入框，指令必须在别的文字频道里打，用 `channel` 选项指定论坛**；`/subscribe`、`/unsubscribe`、`/unsubscribe-all`、`/subscriptions` 都有这个可选选项，不填就是当前频道。
    - 该频道如果同时还订阅了某个具体科目，那个科目的条目会同时推到两处（常用于「主频道 + 论坛存档」）；不想要就把具体科目的订阅 `unsubscribe` 掉。
    - 论坛标签是繁体（`數學`）而科目是简体（`数学`）时，用 `/subject-alias name:数学 aliases:數學` 让它们对上，否则会新建一个简体的 `数学` 标签（繁简各一个）。
 
