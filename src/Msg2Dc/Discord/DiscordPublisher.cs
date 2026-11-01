@@ -409,6 +409,14 @@ public sealed class DiscordPublisher : IDiscordPublisher
             return matched.ToArray();
         }
 
+        if (!forum.Guild.CurrentUser.GetPermissions(forum).ManageChannel)
+        {
+            _log.LogDebug(
+                "Skipping forum tag creation in channel {ChannelId}: missing ManageChannel (wanted {Tags})",
+                forum.Id, string.Join(", ", missing));
+            return matched.ToArray();
+        }
+
         try
         {
             var tags = existing.Cast<IForumTag>().ToList();
