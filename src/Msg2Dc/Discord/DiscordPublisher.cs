@@ -1,5 +1,6 @@
 using Discord;
 using Discord.Net;
+using Discord.Rest;
 using Discord.WebSocket;
 using Microsoft.Extensions.Options;
 using MongoDB.Driver;
@@ -331,39 +332,77 @@ public sealed class DiscordPublisher : IDiscordPublisher
     }
 
     /// <summary>
-    /// Applies matching forum tags for the subject, the kind and any item tag that already
-    /// exists. Missing subject/kind tags are created when the bot can manage the channel and
-    /// the forum is below Discord's 20-tag cap.
+    /// Applies matching forum tags for the subject (its name or any of its aliases, so a
+    /// forum that names tags in traditional Chinese still matches a simplified subject), the
+    /// kind and any item tag that already exists. Missing subject/kind tags are created when
+    /// the forum is below Discord's 20-tag cap and the bot may manage the channel.
     /// </summary>
     private async Task<ForumTag[]> ResolveForumTagsAsync(SocketForumChannel forum, ItemDoc item, CancellationToken ct)
     {
-        var wanted = new List<string>();
+        var wanted = new List<(string Name, bool Create, IReadOnlyList<string> Candidates)>();
+
         if (!string.IsNullOrWhiteSpace(item.SubjectName) &&
             !string.Equals(item.SubjectName, "other", StringComparison.OrdinalIgnoreCase))
         {
-            wanted.Add(DiscordText.Clip(item.SubjectName, 20));
+            var subject = await FindSubjectAsync(item.SubjectName, ct);
+            var candidates = new List<string> { item.SubjectName };
+            if (subject?.Aliases is { Count: > 0 })
+            {
+                candidates.AddRange(subject.Aliases.Where(a => !string.IsNullOrWhiteSpace(a)));
+            }
+
+            wanted.Add((
+                DiscordText.Clip(item.SubjectName, 20),
+                true,
+                candidates.Select(n => DiscordText.Clip(n, 20)).Distinct(StringComparer.Ordinal).ToList()));
         }
 
-        wanted.Add(DiscordEmbeds.KindLabel(item.Kind));
+        var kindLabel = DiscordEmbeds.KindLabel(item.Kind);
+        wanted.Add((kindLabel, true, new[] { kindLabel }));
+
+        foreach (var tag in item.Tags ?? new List<string>())
+        {
+            if (string.IsNullOrWhiteSpace(tag))
+            {
+                continue;
+            }
+
+            var name = DiscordText.Clip(tag, 20);
+            wanted.Add((name, false, new[] { name }));
+        }
 
         var existing = forum.Tags.ToList();
         var byName = existing
-            .GroupBy(t => t.Name, StringComparer.OrdinalIgnoreCase)
-            .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
+            .GroupBy(t => NormalizeTagName(t.Name), StringComparer.Ordinal)
+            .ToDictionary(g => g.Key, g => g.First(), StringComparer.Ordinal);
 
         var matched = new List<ForumTag>();
-        foreach (var name in wanted.Concat(item.Tags ?? new List<string>()))
+        var missing = new List<string>();
+        foreach (var (name, create, candidates) in wanted)
         {
-            if (byName.TryGetValue(name, out var tag) && matched.All(t => t.Id != tag.Id))
+            ForumTag? hit = null;
+            foreach (var candidate in candidates)
             {
-                matched.Add(tag);
+                if (byName.TryGetValue(NormalizeTagName(candidate), out var tag))
+                {
+                    hit = tag;
+                    break;
+                }
+            }
+
+            if (hit.HasValue)
+            {
+                var tag = hit.Value;
+                if (matched.All(t => t.Id != tag.Id))
+                {
+                    matched.Add(tag);
+                }
+            }
+            else if (create && !missing.Contains(name, StringComparer.OrdinalIgnoreCase))
+            {
+                missing.Add(name);
             }
         }
-
-        var missing = wanted
-            .Where(n => !byName.ContainsKey(n))
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToList();
 
         if (missing.Count == 0 || existing.Count + missing.Count > MaxForumTags)
         {
@@ -372,17 +411,15 @@ public sealed class DiscordPublisher : IDiscordPublisher
 
         try
         {
-            var builders = existing.Select(t => t.ToForumTagBuilder()).ToList();
+            var tags = existing.Cast<IForumTag>().ToList();
             foreach (var name in missing)
             {
-                builders.Add(new ForumTagBuilder { Name = DiscordText.Clip(name, 20) });
+                tags.Add(new ForumTagBuilder { Name = DiscordText.Clip(name, 20) }.Build());
             }
 
-            await forum.ModifyAsync(
-                x => x.Tags = builders.Cast<IForumTag>().ToList(),
-                WriteOptions(ct));
+            await forum.ModifyAsync(x => x.Tags = tags, WriteOptions(ct));
 
-            foreach (var tag in forum.Tags)
+            foreach (var tag in await FetchForumTagsAsync(forum, ct))
             {
                 if (missing.Contains(tag.Name, StringComparer.OrdinalIgnoreCase) && matched.All(t => t.Id != tag.Id))
                 {
@@ -401,6 +438,35 @@ public sealed class DiscordPublisher : IDiscordPublisher
 
         return matched.ToArray();
     }
+
+    /// <summary>
+    /// <see cref="SocketForumChannel.ModifyAsync"/> does not refresh the cached tag list, so
+    /// the new tags (and their snowflakes) have to be read back from REST.
+    /// </summary>
+    private async Task<IReadOnlyCollection<ForumTag>> FetchForumTagsAsync(SocketForumChannel forum, CancellationToken ct)
+    {
+        try
+        {
+            if (await _client.Rest.GetChannelAsync(forum.Id, WriteOptions(ct)) is RestForumChannel channel)
+            {
+                return channel.Tags;
+            }
+        }
+        catch (Exception ex)
+        {
+            _log.LogDebug(ex, "Could not refresh forum tags for channel {ChannelId}", forum.Id);
+        }
+
+        return forum.Tags;
+    }
+
+    private async Task<SubjectDoc?> FindSubjectAsync(string name, CancellationToken ct) =>
+        await _store.Subjects
+            .Find(s => s.Name == name || s.Aliases.Contains(name))
+            .FirstOrDefaultAsync(ct);
+
+    private static string NormalizeTagName(string value) =>
+        new string(value.Where(c => !char.IsWhiteSpace(c)).ToArray()).ToLowerInvariant();
 
     /// <summary>
     /// Discord.Net's default RetryMode retries a 429 in a tight loop; fail fast instead

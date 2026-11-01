@@ -170,7 +170,7 @@ curl -i -X POST localhost:5000/line/webhook \
 4. `/set-model gemini gemini-flash-lite-latest`
 5. 在 `#数学` 频道里打 `/subscribe 数学`；如果目标是一个论坛频道，同样在这里打，之后该科目的条目会发成论坛帖。
 6. `/set-archive #资料库`、`/set-default #未分类`（默认频道也可以选论坛）。
-7. 论坛标签：发帖时会自动套用与「科目」「类型」同名的标签；论坛里没有的科目/类型标签如果 bot 有管理频道权限会自动创建（上限 20 个）。
+7. 论坛标签：发帖时会自动套用与「科目名」「科目别名」「类型」同名的标签（比较时忽略大小写与空格，所以繁体标签名可以与「數學」这类别名对上）。论坛里没有的科目/类型标签，如果 bot 有「管理频道」权限会自动创建（上限 20 个）；没有权限时只匹配已有标签，发帖照常进行，日志里会有一条 warning。
 
 ### 班级群混科（重点）
 
@@ -247,6 +247,7 @@ curl -i -X POST localhost:5000/line/webhook \
 
 - **LINE 只收不发**：`LineApiClient` 的每个请求都走 `ReadAsync`，任何 `/message/push|reply|multicast|broadcast|narrowcast` 都会直接抛异常。不要绕开这个入口。
 - **论坛发帖**：`DiscordPublisher` 检测到 `SocketForumChannel` 就用 `CreatePostAsync` 建帖，`posts` 里存的是线程 ID；删除时先按线程处理。论坛的「帖子」就是线程。
+- **论坛标签的 Discord.Net 坑**：`ForumChannelProperties.Tags` 要的是 `IEnumerable<IForumTag>`，而 `ForumTagBuilder` 不实现它，必须 `.Build()` 成 `ForumTagProperties`；`ForumTag` 本身是 struct；`SocketForumChannel.ModifyAsync` 不回写本地缓存，新建的标签要从 REST（`_client.Rest.GetChannelAsync`）重新读。照抄「直接塞 builder」会得到 `InvalidCastException`，并且只在建标签时炸，发帖本身不受影响。
 
 > 以上来自 5 个子代理的完整代码审查，已修的一批见 `496ce9e` 的提交信息。
 
