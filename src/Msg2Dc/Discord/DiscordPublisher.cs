@@ -358,7 +358,7 @@ public sealed class DiscordPublisher : IDiscordPublisher
         }
 
         var kindLabel = DiscordEmbeds.KindLabel(item.Kind);
-        wanted.Add((kindLabel, true, new[] { kindLabel }));
+        wanted.Add((kindLabel, true, DiscordEmbeds.KindTagCandidates(item.Kind)));
 
         foreach (var tag in item.Tags ?? new List<string>())
         {

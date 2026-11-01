@@ -126,6 +126,22 @@ public static class DiscordEmbeds
         _ => string.IsNullOrWhiteSpace(kind) ? "其他" : kind
     };
 
+    /// <summary>
+    /// Names a forum tag may already use for this kind, so a channel whose tags are
+    /// traditional Chinese (or English) still matches instead of gaining a duplicate.
+    /// </summary>
+    public static IReadOnlyList<string> KindTagCandidates(string kind) => kind switch
+    {
+        "homework" or "task" or "assignment" => new[] { "作业", "作業", "homework" },
+        "exam" or "test" => new[] { "考试", "考試", "exam" },
+        "announcement" or "notice" => new[] { "通知", "announcement" },
+        "notes" => new[] { "笔记", "筆記", "notes" },
+        "question" => new[] { "提问", "提問", "question" },
+        "resource" or "material" or "file" => new[] { "资料", "資料", "resource" },
+        "chat" => new[] { "闲聊", "閒聊", "chat" },
+        _ => new[] { KindLabel(kind) }
+    };
+
     private static Color ColorFor(string kind) => kind switch
     {
         "homework" or "task" or "assignment" => new Color(230, 126, 34),
