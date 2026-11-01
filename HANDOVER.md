@@ -164,13 +164,16 @@ curl -i -X POST localhost:5000/line/webhook \
 
 ## 6. 首次配置流程（Discord 侧）
 
-1. 用日志里的邀请链接把 bot 加进服务器（权限 125952，不要 Administrator）。
+1. 用日志里的邀请链接把 bot 加进服务器（`permissions=328565386320`，含「管理频道」以便自动建论坛标签；不要 Administrator）。
 2. 重启服务（或设好 `Discord__GuildId`），指令才会以服务器指令注册。
 3. `/status` 确认供应商与模型。
 4. `/set-model gemini gemini-flash-lite-latest`
 5. 在 `#数学` 频道里打 `/subscribe 数学`；如果目标是一个论坛频道，同样在这里打，之后该科目的条目会发成论坛帖。
 6. `/set-archive #资料库`、`/set-default #未分类`（默认频道也可以选论坛）。
 7. 论坛标签：发帖时会自动套用与「科目名」「科目别名」「类型」同名的标签（比较时忽略大小写与空格，所以繁体标签名可以与「數學」这类别名对上）。论坛里没有的科目/类型标签，如果 bot 有「管理频道」权限会自动创建（上限 20 个）；没有权限时只匹配已有标签，发帖照常进行，日志里会有一条 warning。
+8. **一个论坛收全部科目**：在论坛频道里打 `/subscribe-all`，任何科目的条目都会发成该论坛的帖子，每帖按科目与类型打标签，之后靠标签筛选。`/unsubscribe-all` 取消。订阅里 `SubjectName` 存的是 `*`（`SubscriptionDoc.AllSubjects`），`/subscribe` 时填「全部 / all / *」也是同一个效果。
+   - 该频道如果同时还订阅了某个具体科目，那个科目的条目会同时推到两处（常用于「主频道 + 论坛存档」）；不想要就把具体科目的订阅 `unsubscribe` 掉。
+   - 论坛标签是繁体（`數學`）而科目是简体（`数学`）时，用 `/subject-alias name:数学 aliases:數學` 让它们对上，否则会新建一个简体的 `数学` 标签（繁简各一个）。
 
 ### 班级群混科（重点）
 
@@ -247,6 +250,7 @@ curl -i -X POST localhost:5000/line/webhook \
 
 - **LINE 只收不发**：`LineApiClient` 的每个请求都走 `ReadAsync`，任何 `/message/push|reply|multicast|broadcast|narrowcast` 都会直接抛异常。不要绕开这个入口。
 - **论坛发帖**：`DiscordPublisher` 检测到 `SocketForumChannel` 就用 `CreatePostAsync` 建帖，`posts` 里存的是线程 ID；删除时先按线程处理。论坛的「帖子」就是线程。
+- **路由**：`MessageWorker.ResolveChannelsAsync` 用 `SubjectName in (条目的科目, "*")` 查订阅，所以「全部科目」订阅可以和具体科目订阅并存；只有两者都没有时才回落到默认频道。
 - **论坛标签的 Discord.Net 坑**：`ForumChannelProperties.Tags` 要的是 `IEnumerable<IForumTag>`，而 `ForumTagBuilder` 不实现它，必须 `.Build()` 成 `ForumTagProperties`；`ForumTag` 本身是 struct；`SocketForumChannel.ModifyAsync` 不回写本地缓存，新建的标签要从 REST（`_client.Rest.GetChannelAsync`）重新读。照抄「直接塞 builder」会得到 `InvalidCastException`，并且只在建标签时炸，发帖本身不受影响。
 
 > 以上来自 5 个子代理的完整代码审查，已修的一批见 `496ce9e` 的提交信息。

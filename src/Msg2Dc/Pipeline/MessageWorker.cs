@@ -378,7 +378,9 @@ public sealed class MessageWorker : BackgroundService
     private async Task<List<string>> ResolveChannelsAsync(ItemDoc item, CancellationToken ct)
     {
         var subscriptions = await _store.Subscriptions
-            .Find(Builders<SubscriptionDoc>.Filter.Eq(s => s.SubjectName, item.SubjectName))
+            .Find(Builders<SubscriptionDoc>.Filter.In(
+                s => s.SubjectName,
+                new[] { item.SubjectName, SubscriptionDoc.AllSubjects }))
             .ToListAsync(ct);
 
         var channels = subscriptions.Select(s => s.ChannelId).Distinct().ToList();

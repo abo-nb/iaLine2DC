@@ -88,6 +88,12 @@ public sealed class SubjectDoc
 
 public sealed class SubscriptionDoc
 {
+    /// <summary>
+    /// SubjectName value that matches every subject, including ones added later. Used to
+    /// collect a whole class group into one forum channel and filter by tag afterwards.
+    /// </summary>
+    public const string AllSubjects = "*";
+
     public ObjectId Id { get; set; }
     public string GuildId { get; set; } = "";
     public string ChannelId { get; set; } = "";

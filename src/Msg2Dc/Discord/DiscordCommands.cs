@@ -11,7 +11,7 @@ public static class DiscordCommands
 
     public static readonly HashSet<string> AdminCommands = new(StringComparer.Ordinal)
     {
-        "subscribe", "unsubscribe", "subscriptions",
+        "subscribe", "subscribe-all", "unsubscribe", "unsubscribe-all", "subscriptions",
         "subject-add", "subject-remove", "subject-alias", "subjects",
         "set-archive", "set-default",
         "groups", "group-bind", "group-unbind",
@@ -48,10 +48,20 @@ public static class DiscordCommands
                 .AddOption(Text("subject", "科目名称或别名（不存在会自动创建）", required: true))
                 .Build()),
 
+            ("subscribe-all", (ApplicationCommandProperties)new SlashCommandBuilder()
+                .WithName("subscribe-all")
+                .WithDescription("把当前频道（可以是论坛）订阅到全部科目，之后新增的科目也自动包含")
+                .Build()),
+
             ("unsubscribe", (ApplicationCommandProperties)new SlashCommandBuilder()
                 .WithName("unsubscribe")
                 .WithDescription("取消当前频道对某个科目的订阅")
                 .AddOption(Text("subject", "科目名称或别名", required: true))
+                .Build()),
+
+            ("unsubscribe-all", (ApplicationCommandProperties)new SlashCommandBuilder()
+                .WithName("unsubscribe-all")
+                .WithDescription("取消当前频道的「全部科目」订阅")
                 .Build()),
 
             ("subscriptions", (ApplicationCommandProperties)new SlashCommandBuilder()

@@ -64,8 +64,14 @@ public sealed class DiscordCommandHandler
                 case "subscribe":
                     await SubscribeAsync(command, ct);
                     break;
+                case "subscribe-all":
+                    await SubscribeAllAsync(command, ct);
+                    break;
                 case "unsubscribe":
                     await UnsubscribeAsync(command, ct);
+                    break;
+                case "unsubscribe-all":
+                    await UnsubscribeAllAsync(command, ct);
                     break;
                 case "subscriptions":
                     await SubscriptionsAsync(command, ct);
@@ -266,20 +272,14 @@ public sealed class DiscordCommandHandler
             return;
         }
 
-        var subject = await EnsureSubjectAsync(subjectArg, ct);
+        if (IsAllSubjects(subjectArg))
+        {
+            await SubscribeAllAsync(command, ct);
+            return;
+        }
 
-        await _store.Subscriptions.UpdateOneAsync(
-            Builders<SubscriptionDoc>.Filter.And(
-                Builders<SubscriptionDoc>.Filter.Eq(s => s.ChannelId, channelId.ToString()),
-                Builders<SubscriptionDoc>.Filter.Eq(s => s.SubjectName, subject.Name)),
-            Builders<SubscriptionDoc>.Update
-                .SetOnInsert(s => s.GuildId, guildId.ToString())
-                .SetOnInsert(s => s.ChannelId, channelId.ToString())
-                .SetOnInsert(s => s.SubjectName, subject.Name)
-                .SetOnInsert(s => s.CreatedBy, command.User.Id.ToString())
-                .SetOnInsert(s => s.CreatedAt, DateTime.UtcNow),
-            new UpdateOptions { IsUpsert = true },
-            ct);
+        var subject = await EnsureSubjectAsync(subjectArg, ct);
+        await UpsertSubscriptionAsync(guildId, channelId, subject.Name, command.User.Id, ct);
 
         var channelCount = await _store.Subscriptions.CountDocumentsAsync(
             Builders<SubscriptionDoc>.Filter.Eq(s => s.SubjectName, subject.Name),
@@ -288,6 +288,68 @@ public sealed class DiscordCommandHandler
         await ReplyAsync(command,
             $"本频道已订阅科目 **{subject.Name}**，该科目共有 {channelCount} 个频道订阅。",
             ephemeral: true);
+    }
+
+    private async Task SubscribeAllAsync(SocketSlashCommand command, CancellationToken ct)
+    {
+        if (command.GuildId is not ulong guildId || command.ChannelId is not ulong channelId)
+        {
+            await ReplyAsync(command, "该命令只能在服务器频道中使用。", ephemeral: true);
+            return;
+        }
+
+        await UpsertSubscriptionAsync(guildId, channelId, SubscriptionDoc.AllSubjects, command.User.Id, ct);
+
+        await ReplyAsync(command,
+            "本频道已订阅**全部科目**（含以后新增的科目）。论坛帖会按科目与类型自动打标签，用标签筛选即可。",
+            ephemeral: true);
+    }
+
+    private async Task UnsubscribeAllAsync(SocketSlashCommand command, CancellationToken ct)
+    {
+        if (command.ChannelId is not ulong channelId)
+        {
+            await ReplyAsync(command, "该命令只能在服务器频道中使用。", ephemeral: true);
+            return;
+        }
+
+        var result = await _store.Subscriptions.DeleteOneAsync(
+            Builders<SubscriptionDoc>.Filter.And(
+                Builders<SubscriptionDoc>.Filter.Eq(s => s.ChannelId, channelId.ToString()),
+                Builders<SubscriptionDoc>.Filter.Eq(s => s.SubjectName, SubscriptionDoc.AllSubjects)),
+            ct);
+
+        await ReplyAsync(command,
+            result.DeletedCount > 0 ? "本频道已取消「全部科目」订阅。" : "本频道没有「全部科目」订阅。",
+            ephemeral: true);
+    }
+
+    private Task UpsertSubscriptionAsync(
+        ulong guildId,
+        ulong channelId,
+        string subjectName,
+        ulong userId,
+        CancellationToken ct) =>
+        _store.Subscriptions.UpdateOneAsync(
+            Builders<SubscriptionDoc>.Filter.And(
+                Builders<SubscriptionDoc>.Filter.Eq(s => s.ChannelId, channelId.ToString()),
+                Builders<SubscriptionDoc>.Filter.Eq(s => s.SubjectName, subjectName)),
+            Builders<SubscriptionDoc>.Update
+                .SetOnInsert(s => s.GuildId, guildId.ToString())
+                .SetOnInsert(s => s.ChannelId, channelId.ToString())
+                .SetOnInsert(s => s.SubjectName, subjectName)
+                .SetOnInsert(s => s.CreatedBy, userId.ToString())
+                .SetOnInsert(s => s.CreatedAt, DateTime.UtcNow),
+            new UpdateOptions { IsUpsert = true },
+            ct);
+
+    private static bool IsAllSubjects(string value)
+    {
+        var trimmed = value.Trim();
+        return trimmed == SubscriptionDoc.AllSubjects ||
+               trimmed.Equals("全部", StringComparison.OrdinalIgnoreCase) ||
+               trimmed.Equals("所有", StringComparison.OrdinalIgnoreCase) ||
+               trimmed.Equals("all", StringComparison.OrdinalIgnoreCase);
     }
 
     private async Task UnsubscribeAsync(SocketSlashCommand command, CancellationToken ct)
@@ -302,6 +364,12 @@ public sealed class DiscordCommandHandler
         if (string.IsNullOrWhiteSpace(subjectArg))
         {
             await ReplyAsync(command, "请指定科目。", ephemeral: true);
+            return;
+        }
+
+        if (IsAllSubjects(subjectArg))
+        {
+            await UnsubscribeAllAsync(command, ct);
             return;
         }
 
@@ -342,7 +410,10 @@ public sealed class DiscordCommandHandler
         builder.Append("**本频道订阅的科目**\n");
         foreach (var subscription in subscriptions)
         {
-            builder.Append("• ").Append(subscription.SubjectName).Append('\n');
+            var label = subscription.SubjectName == SubscriptionDoc.AllSubjects
+                ? "全部科目（含以后新增的）"
+                : subscription.SubjectName;
+            builder.Append("• ").Append(label).Append('\n');
         }
 
         await ReplyAsync(command, builder.ToString().TrimEnd(), ephemeral: true);
