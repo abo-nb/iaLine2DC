@@ -94,6 +94,9 @@ public sealed class DiscordCommandHandler
                 case "group-bind":
                     await GroupBindAsync(command, ct);
                     break;
+                case "group-unbind":
+                    await GroupUnbindAsync(command, ct);
+                    break;
                 case "set-model":
                     await SetModelAsync(command, ct);
                     break;
@@ -490,15 +493,34 @@ public sealed class DiscordCommandHandler
     private async Task SetChannelAsync(SocketSlashCommand command, bool archive, CancellationToken ct)
     {
         var channelId = OptionChannelId(command, "channel");
-        if (channelId is null || _client.GetChannel(channelId.Value) is not SocketTextChannel channel)
+        if (channelId is null)
         {
-            await ReplyAsync(command, "找不到该频道，或它不是文字频道。", ephemeral: true);
+            await ReplyAsync(command, "找不到该频道。", ephemeral: true);
+            return;
+        }
+
+        var resolved = _client.GetChannel(channelId.Value);
+        ulong targetId;
+
+        if (resolved is SocketTextChannel text)
+        {
+            targetId = text.Id;
+        }
+        else if (!archive && resolved is SocketForumChannel forum)
+        {
+            targetId = forum.Id;
+        }
+        else
+        {
+            await ReplyAsync(command,
+                archive ? "归档频道必须是文字频道。" : "找不到该频道，或它不是文字频道/论坛频道。",
+                ephemeral: true);
             return;
         }
 
         var update = archive
-            ? Builders<SettingsDoc>.Update.Set(s => s.ArchiveChannelId, channel.Id.ToString())
-            : Builders<SettingsDoc>.Update.Set(s => s.DefaultChannelId, channel.Id.ToString());
+            ? Builders<SettingsDoc>.Update.Set(s => s.ArchiveChannelId, targetId.ToString())
+            : Builders<SettingsDoc>.Update.Set(s => s.DefaultChannelId, targetId.ToString());
 
         update = update
             .Set(s => s.UpdatedAt, DateTime.UtcNow)
@@ -511,7 +533,7 @@ public sealed class DiscordCommandHandler
             ct);
 
         await ReplyAsync(command,
-            archive ? $"已设置归档频道：<#{channel.Id}>" : $"已设置默认推送频道：<#{channel.Id}>",
+            archive ? $"已设置归档频道：<#{targetId}>" : $"已设置默认推送频道：<#{targetId}>",
             ephemeral: true);
     }
 
@@ -535,7 +557,7 @@ public sealed class DiscordCommandHandler
         {
             builder.Append("• ").Append(string.IsNullOrWhiteSpace(group.DisplayName) ? "（未命名）" : group.DisplayName)
                 .Append(" — `").Append(group.LineGroupId).Append('`')
-                .Append(" · 科目 ").Append(string.IsNullOrWhiteSpace(group.SubjectName) ? "未绑定" : group.SubjectName);
+                .Append(" · 科目 ").Append(string.IsNullOrWhiteSpace(group.SubjectName) ? "未绑定（按消息自动分科）" : group.SubjectName);
 
             if (!group.Active)
             {
@@ -545,7 +567,7 @@ public sealed class DiscordCommandHandler
             builder.Append('\n');
         }
 
-        builder.Append("使用 /group-bind 绑定群与科目。");
+        builder.Append("使用 /group-bind 绑定群与科目；一个群混多科时保持未绑定，或 /group-unbind 解除。");
         await ReplyAsync(command, builder.ToString(), ephemeral: true);
     }
 
@@ -575,6 +597,33 @@ public sealed class DiscordCommandHandler
         }
 
         await ReplyAsync(command, $"LINE 群 `{groupId}` 已绑定科目 **{subject.Name}**。", ephemeral: true);
+    }
+
+    private async Task GroupUnbindAsync(SocketSlashCommand command, CancellationToken ct)
+    {
+        var groupId = OptionString(command, "group")?.Trim();
+        if (string.IsNullOrWhiteSpace(groupId))
+        {
+            await ReplyAsync(command, "请提供 LINE 群 ID。", ephemeral: true);
+            return;
+        }
+
+        var result = await _store.Groups.UpdateOneAsync(
+            Builders<GroupDoc>.Filter.Eq(g => g.LineGroupId, groupId),
+            Builders<GroupDoc>.Update
+                .Set(g => g.SubjectName, (string?)null)
+                .Set(g => g.UpdatedAt, DateTime.UtcNow),
+            cancellationToken: ct);
+
+        if (result.MatchedCount == 0)
+        {
+            await ReplyAsync(command, $"找不到 LINE 群 `{groupId}`，请先用 /groups 查看。", ephemeral: true);
+            return;
+        }
+
+        await ReplyAsync(command,
+            $"LINE 群 `{groupId}` 已解除科目绑定，之后按每条消息的内容自动分科。",
+            ephemeral: true);
     }
 
     private async Task SetModelAsync(SocketSlashCommand command, CancellationToken ct)

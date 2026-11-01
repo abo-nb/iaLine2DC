@@ -114,23 +114,27 @@ public static class DiscordEmbeds
         }
     }
 
-    private static string KindLabel(string kind) => kind switch
+    public static string KindLabel(string kind) => kind switch
     {
-        "task" or "assignment" => "任务",
+        "homework" or "task" or "assignment" => "作业",
         "exam" or "test" => "考试",
-        "notice" or "announcement" => "通知",
-        "material" or "resource" or "file" => "资料",
-        "chat" => "聊天",
+        "announcement" or "notice" => "通知",
+        "notes" => "笔记",
+        "question" => "提问",
+        "resource" or "material" or "file" => "资料",
+        "chat" => "闲聊",
         _ => string.IsNullOrWhiteSpace(kind) ? "其他" : kind
     };
 
     private static Color ColorFor(string kind) => kind switch
     {
-        "task" or "assignment" => new Color(230, 126, 34),
+        "homework" or "task" or "assignment" => new Color(230, 126, 34),
         "exam" or "test" => new Color(231, 76, 60),
-        "notice" or "announcement" => new Color(46, 204, 113),
-        "material" or "resource" or "file" => new Color(52, 152, 219),
+        "announcement" or "notice" => new Color(46, 204, 113),
+        "notes" => new Color(241, 196, 15),
+        "question" => new Color(155, 89, 182),
+        "resource" or "material" or "file" => new Color(52, 152, 219),
         "chat" => new Color(149, 165, 166),
-        _ => new Color(155, 89, 182)
+        _ => new Color(149, 165, 166)
     };
 }

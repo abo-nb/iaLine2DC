@@ -10,6 +10,9 @@ namespace Msg2Dc.Discord;
 
 public sealed class DiscordPublisher : IDiscordPublisher
 {
+    private const int ForumTitleMax = 100;
+    private const int MaxForumTags = 20;
+
     private readonly DiscordSocketClient _client;
     private readonly MongoStore _store;
     private readonly DiscordOptions _options;
@@ -126,6 +129,17 @@ public sealed class DiscordPublisher : IDiscordPublisher
                 continue;
             }
 
+            if (_client.GetChannel(id) is SocketForumChannel forum)
+            {
+                var threadId = await CreateForumPostAsync(forum, item, embed, ct);
+                if (threadId is ulong created)
+                {
+                    posts.Add(new PostRef(channelId, created.ToString()));
+                }
+
+                continue;
+            }
+
             if (_client.GetChannel(id) is not SocketTextChannel channel)
             {
                 _log.LogWarning("Skipping channel {ChannelId}: missing or not a text channel", channelId);
@@ -170,6 +184,21 @@ public sealed class DiscordPublisher : IDiscordPublisher
             {
                 _log.LogWarning("Skipping post with malformed ids (channel {ChannelId}, message {MessageId})",
                     post.ChannelId, post.DiscordMessageId);
+                continue;
+            }
+
+            // Forum posts are threads: the stored id is the thread id, not a message id.
+            if (_client.GetChannel(messageId) is SocketThreadChannel thread)
+            {
+                try
+                {
+                    await thread.DeleteAsync(WriteOptions(ct));
+                }
+                catch (Exception ex)
+                {
+                    _log.LogWarning(ex, "Failed to delete forum post (thread) {ThreadId}", messageId);
+                }
+
                 continue;
             }
 
@@ -244,6 +273,133 @@ public sealed class DiscordPublisher : IDiscordPublisher
         }
 
         return DiscordText.Clip(string.Join(" · ", parts), DiscordText.MessageMax - 100);
+    }
+
+    /// <summary>
+    /// Forum channels accept "posts" (threads) instead of messages. The title is what the
+    /// class will see in the list, so use the item title; tags are matched/created from the
+    /// subject and kind.
+    /// </summary>
+    private async Task<ulong?> CreateForumPostAsync(
+        SocketForumChannel forum,
+        ItemDoc item,
+        Embed embed,
+        CancellationToken ct)
+    {
+        var title = DiscordText.Clip(item.Title, ForumTitleMax);
+        if (title.Length == 0)
+        {
+            title = DiscordEmbeds.KindLabel(item.Kind);
+        }
+
+        var text = DiscordText.Clip(item.Summary, DiscordText.MessageMax - 100);
+        if (text.Length == 0)
+        {
+            text = DiscordEmbeds.KindLabel(item.Kind);
+        }
+
+        try
+        {
+            var tags = await ResolveForumTagsAsync(forum, item, ct);
+
+            var thread = await forum.CreatePostAsync(
+                title,
+                archiveDuration: ThreadArchiveDuration.OneWeek,
+                text: text,
+                embeds: new[] { embed },
+                options: WriteOptions(ct),
+                allowedMentions: AllowedMentions.None,
+                tags: tags);
+
+            _log.LogInformation(
+                "Published item {ItemId} as forum post {ThreadId} in {ChannelId} with {TagCount} tag(s)",
+                item.Id, thread.Id, forum.Id, tags.Length);
+
+            return thread.Id;
+        }
+        catch (RateLimitedException ex)
+        {
+            _log.LogWarning("Discord rate limited creating forum post in {ChannelId}: {Message}", forum.Id, ex.Message);
+            return null;
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "Failed to create forum post for item {ItemId} in channel {ChannelId}",
+                item.Id, forum.Id);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Applies matching forum tags for the subject, the kind and any item tag that already
+    /// exists. Missing subject/kind tags are created when the bot can manage the channel and
+    /// the forum is below Discord's 20-tag cap.
+    /// </summary>
+    private async Task<ForumTag[]> ResolveForumTagsAsync(SocketForumChannel forum, ItemDoc item, CancellationToken ct)
+    {
+        var wanted = new List<string>();
+        if (!string.IsNullOrWhiteSpace(item.SubjectName) &&
+            !string.Equals(item.SubjectName, "other", StringComparison.OrdinalIgnoreCase))
+        {
+            wanted.Add(DiscordText.Clip(item.SubjectName, 20));
+        }
+
+        wanted.Add(DiscordEmbeds.KindLabel(item.Kind));
+
+        var existing = forum.Tags.ToList();
+        var byName = existing
+            .GroupBy(t => t.Name, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
+
+        var matched = new List<ForumTag>();
+        foreach (var name in wanted.Concat(item.Tags ?? new List<string>()))
+        {
+            if (byName.TryGetValue(name, out var tag) && matched.All(t => t.Id != tag.Id))
+            {
+                matched.Add(tag);
+            }
+        }
+
+        var missing = wanted
+            .Where(n => !byName.ContainsKey(n))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        if (missing.Count == 0 || existing.Count + missing.Count > MaxForumTags)
+        {
+            return matched.ToArray();
+        }
+
+        try
+        {
+            var builders = existing.Select(t => t.ToForumTagBuilder()).ToList();
+            foreach (var name in missing)
+            {
+                builders.Add(new ForumTagBuilder { Name = DiscordText.Clip(name, 20) });
+            }
+
+            await forum.ModifyAsync(
+                x => x.Tags = builders.Cast<IForumTag>().ToList(),
+                WriteOptions(ct));
+
+            foreach (var tag in forum.Tags)
+            {
+                if (missing.Contains(tag.Name, StringComparer.OrdinalIgnoreCase) && matched.All(t => t.Id != tag.Id))
+                {
+                    matched.Add(tag);
+                }
+            }
+
+            _log.LogInformation(
+                "Created forum tag(s) {Tags} in channel {ChannelId}",
+                string.Join(", ", missing), forum.Id);
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "Could not create forum tags in channel {ChannelId}; posting without them", forum.Id);
+        }
+
+        return matched.ToArray();
     }
 
     /// <summary>

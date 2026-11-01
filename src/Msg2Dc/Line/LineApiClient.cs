@@ -8,6 +8,18 @@ namespace Msg2Dc.Line;
 public sealed class LineApiClient
 {
     private static readonly JsonSerializerOptions JsonOptions = new() { PropertyNameCaseInsensitive = true };
+
+    // This bot only receives. Keep the LINE side read-only: no push, reply, multicast,
+    // broadcast or narrowcast request may ever leave this process.
+    private static readonly string[] ForbiddenLinePaths =
+    {
+        "/message/push",
+        "/message/reply",
+        "/message/multicast",
+        "/message/broadcast",
+        "/message/narrowcast"
+    };
+
     private readonly HttpClient _http;
     private readonly LineOptions _line;
     private readonly ILogger<LineApiClient> _log;
@@ -26,11 +38,30 @@ public sealed class LineApiClient
 
     private const long MaxContentBytes = 20_000_000;
 
+    /// <summary>
+    /// Every LINE call goes through here. It is a hard block, not a convention: if a future
+    /// change tries to call a send endpoint, it fails loudly instead of messaging the class.
+    /// </summary>
+    private Task<HttpResponseMessage> ReadAsync(string url, CancellationToken ct)
+    {
+        foreach (var forbidden in ForbiddenLinePaths)
+        {
+            if (url.Contains(forbidden, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException(
+                    $"Blocked LINE send endpoint '{forbidden}': this bot is receive-only.");
+            }
+        }
+
+        return _http.GetAsync(url, ct);
+    }
+
+
     public async Task<byte[]?> DownloadContentAsync(string messageId, CancellationToken ct)
     {
         try
         {
-            using var response = await _http.GetAsync(
+            using var response = await ReadAsync(
                 $"https://api-data.line.me/v2/bot/message/{Uri.EscapeDataString(messageId)}/content", ct);
 
             if (!response.IsSuccessStatusCode)
@@ -85,7 +116,7 @@ public sealed class LineApiClient
 
         try
         {
-            using var response = await _http.GetAsync(
+            using var response = await ReadAsync(
                 $"https://api.line.me/v2/bot/group/{Uri.EscapeDataString(groupId)}/member/{Uri.EscapeDataString(userId)}", ct);
 
             if (!response.IsSuccessStatusCode)

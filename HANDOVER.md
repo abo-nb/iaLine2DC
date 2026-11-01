@@ -56,6 +56,9 @@ LINE 群（每群一科）
 | 附件存 Discord | Render 免费层磁盘是临时的，重启即清空 |
 | gateway 主机写死为 `wss://gateway.discord.gg` | 跳过 `GET /gateway/bot`：它桶极小，且 Discord.Net 在 429 时会紧循环重发 |
 | 自己发起的 REST 调用不走 `AlwaysRetry` | 429 必须立即抛异常交给 `DiscordRateLimitGuard`，否则一次 429 会变成几百次请求 |
+| 论坛频道用「建帖」而不是发消息 | 论坛没有普通消息；一个帖子就是一个线程，标题用条目标题，标签按科目/类型自动套 |
+| 混科群不绑定科目 | 绑定了会把科目提示强加给模型；不绑定才能按消息内容拆成多条、分别路由 |
+| LINE 客户端只允许 GET | 班级群只需要收信；在唯一入口硬拦发送类接口，避免以后误加推送 |
 
 ---
 
@@ -165,8 +168,15 @@ curl -i -X POST localhost:5000/line/webhook \
 2. 重启服务（或设好 `Discord__GuildId`），指令才会以服务器指令注册。
 3. `/status` 确认供应商与模型。
 4. `/set-model gemini gemini-flash-lite-latest`
-5. 在 `#数学` 频道里打 `/subscribe 数学`。
-6. `/set-archive #资料库`、`/set-default #未分类`。
+5. 在 `#数学` 频道里打 `/subscribe 数学`；如果目标是一个论坛频道，同样在这里打，之后该科目的条目会发成论坛帖。
+6. `/set-archive #资料库`、`/set-default #未分类`（默认频道也可以选论坛）。
+7. 论坛标签：发帖时会自动套用与「科目」「类型」同名的标签；论坛里没有的科目/类型标签如果 bot 有管理频道权限会自动创建（上限 20 个）。
+
+### 班级群混科（重点）
+
+- **不要**给班级大群 `/group-bind`。未绑定时，每条消息交给模型按内容分科，一条消息里混了数学和英语就会拆成两条，分别推到各自的订阅频道。
+- 已经绑定过就 `/group-unbind <群 ID>` 解除。
+- 只有「一个群只聊一科」时才用 `/group-bind`，它会把该群作为科目提示传给模型。
 
 ---
 
@@ -231,8 +241,12 @@ curl -i -X POST localhost:5000/line/webhook \
 
 ### 低
 
-8. `kind` 词表与卡片展示层不一致，`notes/question/resource` 会以英文原样显示。
-9. `IDiscordPublisher.IsReady` 没有被使用，发布前没有就绪门控。
+8. `IDiscordPublisher.IsReady` 没有被使用，发布前没有就绪门控。
+
+### 设计约束
+
+- **LINE 只收不发**：`LineApiClient` 的每个请求都走 `ReadAsync`，任何 `/message/push|reply|multicast|broadcast|narrowcast` 都会直接抛异常。不要绕开这个入口。
+- **论坛发帖**：`DiscordPublisher` 检测到 `SocketForumChannel` 就用 `CreatePostAsync` 建帖，`posts` 里存的是线程 ID；删除时先按线程处理。论坛的「帖子」就是线程。
 
 > 以上来自 5 个子代理的完整代码审查，已修的一批见 `496ce9e` 的提交信息。
 

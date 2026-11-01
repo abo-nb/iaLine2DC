@@ -14,7 +14,7 @@ public static class DiscordCommands
         "subscribe", "unsubscribe", "subscriptions",
         "subject-add", "subject-remove", "subject-alias", "subjects",
         "set-archive", "set-default",
-        "groups", "group-bind",
+        "groups", "group-bind", "group-unbind",
         "set-model", "reprocess", "status"
     };
 
@@ -92,8 +92,8 @@ public static class DiscordCommands
 
             ("set-default", (ApplicationCommandProperties)new SlashCommandBuilder()
                 .WithName("set-default")
-                .WithDescription("设置没有订阅科目时的默认推送频道")
-                .AddOption(Channel("channel", "默认推送频道"))
+                .WithDescription("设置没有订阅科目时的默认推送频道（可以是论坛）")
+                .AddOption(Channel("channel", "默认推送频道/论坛", allowForum: true))
                 .Build()),
 
             ("groups", (ApplicationCommandProperties)new SlashCommandBuilder()
@@ -106,6 +106,12 @@ public static class DiscordCommands
                 .WithDescription("将 LINE 群绑定到某个科目")
                 .AddOption(Text("group", "LINE 群 ID", required: true))
                 .AddOption(Text("subject", "科目名称或别名", required: true))
+                .Build()),
+
+            ("group-unbind", (ApplicationCommandProperties)new SlashCommandBuilder()
+                .WithName("group-unbind")
+                .WithDescription("解除 LINE 群的科目绑定（一个群混多科时用）")
+                .AddOption(Text("group", "LINE 群 ID", required: true))
                 .Build()),
 
             ("set-model", (ApplicationCommandProperties)new SlashCommandBuilder()
@@ -145,11 +151,20 @@ public static class DiscordCommands
             .WithMinValue(min)
             .WithMaxValue(max);
 
-    private static SlashCommandOptionBuilder Channel(string name, string description) =>
-        new SlashCommandOptionBuilder()
+    private static SlashCommandOptionBuilder Channel(string name, string description, bool allowForum = false)
+    {
+        var builder = new SlashCommandOptionBuilder()
             .WithName(name)
             .WithDescription(description)
             .WithType(ApplicationCommandOptionType.Channel)
             .WithRequired(true)
             .AddChannelType(ChannelType.Text);
+
+        if (allowForum)
+        {
+            builder.AddChannelType(ChannelType.Forum);
+        }
+
+        return builder;
+    }
 }
