@@ -729,7 +729,7 @@ public sealed class DiscordCommandHandler
             var body = message.MsgType == "text"
                 ? DiscordText.Clip(message.Text, 60)
                 : $"[{message.MsgType}] " + DiscordText.Clip(
-                    string.Join(", ", message.Attachments.Select(a => a.FileName ?? a.Kind)), 40);
+                    string.Join(", ", (message.Attachments ?? new()).Select(a => a.FileName ?? a.Kind)), 40);
 
             if (body.Length == 0)
             {
