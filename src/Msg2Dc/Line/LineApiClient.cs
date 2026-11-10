@@ -107,6 +107,37 @@ public sealed class LineApiClient
         }
     }
 
+    /// <summary>
+    /// Group chat id alone is unreadable, so pull the group name once and remember it.
+    /// </summary>
+    public async Task<string?> GetGroupNameAsync(string groupId, CancellationToken ct)
+    {
+        if (string.IsNullOrEmpty(groupId))
+        {
+            return null;
+        }
+
+        try
+        {
+            using var response = await ReadAsync(
+                $"https://api.line.me/v2/bot/group/{Uri.EscapeDataString(groupId)}/summary", ct);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                return null;
+            }
+
+            var body = await response.Content.ReadAsStringAsync(ct);
+            using var document = JsonDocument.Parse(body);
+            return document.RootElement.TryGetProperty("groupName", out var name) ? name.GetString() : null;
+        }
+        catch (Exception ex)
+        {
+            _log.LogDebug(ex, "Group summary lookup failed for {GroupId}", groupId);
+            return null;
+        }
+    }
+
     public async Task<string?> GetGroupMemberNameAsync(string groupId, string userId, CancellationToken ct)
     {
         if (string.IsNullOrEmpty(groupId) || string.IsNullOrEmpty(userId))

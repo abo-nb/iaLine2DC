@@ -5,6 +5,7 @@ using Discord.Net;
 using Discord.WebSocket;
 using MongoDB.Driver;
 using Msg2Dc.Configuration;
+using Msg2Dc.Line;
 using Msg2Dc.Search;
 using Msg2Dc.Storage;
 
@@ -17,6 +18,7 @@ public sealed class DiscordCommandHandler
     private readonly ILlmModelSwitcher _llm;
     private readonly RuntimeOptions _runtime;
     private readonly DiscordSocketClient _client;
+    private readonly LineApiClient _line;
     private readonly ILogger<DiscordCommandHandler> _log;
 
     public DiscordCommandHandler(
@@ -25,6 +27,7 @@ public sealed class DiscordCommandHandler
         ILlmModelSwitcher llm,
         RuntimeOptions runtime,
         DiscordSocketClient client,
+        LineApiClient line,
         ILogger<DiscordCommandHandler> log)
     {
         _store = store;
@@ -32,6 +35,7 @@ public sealed class DiscordCommandHandler
         _llm = llm;
         _runtime = runtime;
         _client = client;
+        _line = line;
         _log = log;
     }
 
@@ -683,13 +687,43 @@ public sealed class DiscordCommandHandler
             .GroupBy(g => g.LineGroupId, StringComparer.Ordinal)
             .ToDictionary(g => g.Key, g => g.First(), StringComparer.Ordinal);
 
+        // Groups recorded before the name lookup existed have no display name; fill them in
+        // now so the id can be recognised, and remember the answer for next time.
+        var names = byId.ToDictionary(
+            pair => pair.Key,
+            pair => pair.Value.DisplayName ?? "",
+            StringComparer.Ordinal);
+
+        foreach (var groupId in messages.Select(m => m.LineGroupId).Distinct(StringComparer.Ordinal))
+        {
+            if (!string.IsNullOrWhiteSpace(names.GetValueOrDefault(groupId)) || !groupId.StartsWith('C'))
+            {
+                continue;
+            }
+
+            var name = await _line.GetGroupNameAsync(groupId, ct);
+            if (string.IsNullOrWhiteSpace(name))
+            {
+                continue;
+            }
+
+            names[groupId] = name;
+            await _store.Groups.UpdateOneAsync(
+                Builders<GroupDoc>.Filter.Eq(g => g.LineGroupId, groupId),
+                Builders<GroupDoc>.Update
+                    .Set(g => g.DisplayName, name)
+                    .Set(g => g.UpdatedAt, DateTime.UtcNow),
+                cancellationToken: ct);
+        }
+
         var builder = new StringBuilder();
         builder.Append("**最近 ").Append(messages.Count).Append(" 条 LINE 消息**\n");
 
         foreach (var message in messages)
         {
             byId.TryGetValue(message.LineGroupId, out var group);
-            var groupName = string.IsNullOrWhiteSpace(group?.DisplayName) ? "（未命名群）" : group.DisplayName!;
+            var resolved = names.GetValueOrDefault(message.LineGroupId);
+            var groupName = string.IsNullOrWhiteSpace(resolved) ? "（未命名群）" : resolved;
             var subject = string.IsNullOrWhiteSpace(group?.SubjectName) ? "未绑定" : group.SubjectName!;
 
             var body = message.MsgType == "text"

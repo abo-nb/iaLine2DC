@@ -13,10 +13,18 @@ public sealed class WebhookIngest
     private readonly PipelineOptions _pipeline;
     private readonly ILogger<WebhookIngest> _log;
 
-    public WebhookIngest(MongoStore store, JobQueue queue, IOptions<PipelineOptions> pipeline, ILogger<WebhookIngest> log)
+    private readonly LineApiClient _line;
+
+    public WebhookIngest(
+        MongoStore store,
+        JobQueue queue,
+        LineApiClient line,
+        IOptions<PipelineOptions> pipeline,
+        ILogger<WebhookIngest> log)
     {
         _store = store;
         _queue = queue;
+        _line = line;
         _pipeline = pipeline.Value;
         _log = log;
     }
@@ -183,12 +191,33 @@ public sealed class WebhookIngest
         _log.LogInformation("Bot left group {GroupId}", groupId);
     }
 
-    private Task EnsureGroupAsync(string groupId, CancellationToken ct) =>
-        _store.Groups.UpdateOneAsync(
+    /// <summary>
+    /// Records the group and, while the name is still unknown, asks LINE for the group
+    /// summary so `/groups` and `/recent` can show a human name next to the id.
+    /// </summary>
+    private async Task EnsureGroupAsync(string groupId, CancellationToken ct)
+    {
+        var group = await _store.Groups
+            .Find(Builders<GroupDoc>.Filter.Eq(g => g.LineGroupId, groupId))
+            .FirstOrDefaultAsync(ct);
+
+        var update = Builders<GroupDoc>.Update
+            .SetOnInsert(g => g.CreatedAt, DateTime.UtcNow)
+            .Set(g => g.UpdatedAt, DateTime.UtcNow);
+
+        if (string.IsNullOrWhiteSpace(group?.DisplayName) && groupId.StartsWith('C'))
+        {
+            var name = await _line.GetGroupNameAsync(groupId, ct);
+            if (!string.IsNullOrWhiteSpace(name))
+            {
+                update = update.Set(g => g.DisplayName, name);
+            }
+        }
+
+        await _store.Groups.UpdateOneAsync(
             Builders<GroupDoc>.Filter.Eq(g => g.LineGroupId, groupId),
-            Builders<GroupDoc>.Update
-                .SetOnInsert(g => g.CreatedAt, DateTime.UtcNow)
-                .Set(g => g.UpdatedAt, DateTime.UtcNow),
+            update,
             new UpdateOptions { IsUpsert = true },
             ct);
+    }
 }

@@ -93,7 +93,7 @@ src/Msg2Dc/
 │  ├─ DiscordBotService.cs   网关 + 熔断 + 指令注册 + 邀请链接
 │  ├─ DiscordRateLimitGuard.cs 429 截止时间（落库）+ 唤醒监督循环
 │  ├─ RateLimitState.cs      纯状态机，可单测
-│  ├─ DiscordCommandHandler.cs 17 条指令
+│  ├─ DiscordCommandHandler.cs 21 条指令
 │  ├─ DiscordPublisher.cs    卡片发送 + 附件归档 + 撤回删除
 │  ├─ DiscordEmbeds.cs       卡片排版（含长度上限保护）
 │  └─ DiscordCommands.cs     指令定义
@@ -182,6 +182,7 @@ curl -i -X POST localhost:5000/line/webhook \
 - **不要**给班级大群 `/group-bind`。未绑定时，每条消息交给模型按内容分科，一条消息里混了数学和英语就会拆成两条，分别推到各自的订阅频道。
 - 已经绑定过就 `/group-unbind <群 ID>` 解除。
 - 只有「一个群只聊一科」时才用 `/group-bind`，它会把该群作为科目提示传给模型。
+- **认不出是哪个群**：用 `/recent [count] [group]` 看最近收到的消息（群名、群 ID、发送者、内容预览）。群名来自 LINE 的 `/v2/bot/group/{id}/summary`，收到消息时若还没名字会自动拉一次并写进 `groups`，所以通常第一次就能看到名字；`/recent` 也会给历史群补名字。
 
 ---
 
