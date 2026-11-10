@@ -14,7 +14,7 @@ public static class DiscordCommands
         "subscribe", "subscribe-all", "unsubscribe", "unsubscribe-all", "subscriptions",
         "subject-add", "subject-remove", "subject-alias", "subjects",
         "set-archive", "set-default",
-        "groups", "group-bind", "group-unbind",
+        "groups", "recent", "group-bind", "group-unbind",
         "set-model", "reprocess", "status"
     };
 
@@ -114,6 +114,13 @@ public static class DiscordCommands
             ("groups", (ApplicationCommandProperties)new SlashCommandBuilder()
                 .WithName("groups")
                 .WithDescription("列出已知的 LINE 群及其绑定科目")
+                .Build()),
+
+            ("recent", (ApplicationCommandProperties)new SlashCommandBuilder()
+                .WithName("recent")
+                .WithDescription("查看最近收到的 LINE 消息，用来确认是哪個群組")
+                .AddOption(Integer("count", "显示条数（默认 5，最多 20）", min: 1, max: 20))
+                .AddOption(Text("group", "只看某个 LINE 群 ID（可选）"))
                 .Build()),
 
             ("group-bind", (ApplicationCommandProperties)new SlashCommandBuilder()

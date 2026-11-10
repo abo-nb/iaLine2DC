@@ -97,6 +97,9 @@ public sealed class DiscordCommandHandler
                 case "groups":
                     await GroupsAsync(command, ct);
                     break;
+                case "recent":
+                    await RecentAsync(command, ct);
+                    break;
                 case "group-bind":
                     await GroupBindAsync(command, ct);
                     break;
@@ -644,6 +647,90 @@ public sealed class DiscordCommandHandler
         await ReplyAsync(command,
             archive ? $"已设置归档频道：<#{targetId}>" : $"已设置默认推送频道：<#{targetId}>",
             ephemeral: true);
+    }
+
+    private async Task RecentAsync(SocketSlashCommand command, CancellationToken ct)
+    {
+        var count = Math.Clamp(OptionInt(command, "count") ?? 5, 1, 20);
+        var groupFilter = OptionString(command, "group")?.Trim();
+
+        var filter = Builders<MessageDoc>.Filter.Empty;
+        if (!string.IsNullOrWhiteSpace(groupFilter))
+        {
+            filter = Builders<MessageDoc>.Filter.Eq(m => m.LineGroupId, groupFilter);
+        }
+
+        var messages = await _store.Messages
+            .Find(filter)
+            .SortByDescending(m => m.ReceivedAt)
+            .Limit(count)
+            .ToListAsync(ct);
+
+        if (messages.Count == 0)
+        {
+            await ReplyAsync(command,
+                string.IsNullOrWhiteSpace(groupFilter)
+                    ? "还没有收到任何 LINE 消息。"
+                    : $"群 `{groupFilter}` 还没有收到消息。",
+                ephemeral: true);
+            return;
+        }
+
+        var groups = await _store.Groups
+            .Find(Builders<GroupDoc>.Filter.Empty)
+            .ToListAsync(ct);
+        var byId = groups
+            .GroupBy(g => g.LineGroupId, StringComparer.Ordinal)
+            .ToDictionary(g => g.Key, g => g.First(), StringComparer.Ordinal);
+
+        var builder = new StringBuilder();
+        builder.Append("**最近 ").Append(messages.Count).Append(" 条 LINE 消息**\n");
+
+        foreach (var message in messages)
+        {
+            byId.TryGetValue(message.LineGroupId, out var group);
+            var groupName = string.IsNullOrWhiteSpace(group?.DisplayName) ? "（未命名群）" : group.DisplayName!;
+            var subject = string.IsNullOrWhiteSpace(group?.SubjectName) ? "未绑定" : group.SubjectName!;
+
+            var body = message.MsgType == "text"
+                ? DiscordText.Clip(message.Text, 60)
+                : $"[{message.MsgType}] " + DiscordText.Clip(
+                    string.Join(", ", message.Attachments.Select(a => a.FileName ?? a.Kind)), 40);
+
+            if (body.Length == 0)
+            {
+                body = "（空）";
+            }
+
+            body = body.ReplaceLineEndings(" ");
+
+            builder.Append("• ").Append(DiscordText.Absolute(message.ReceivedAt))
+                .Append(" · **").Append(groupName).Append("** `").Append(message.LineGroupId).Append('`')
+                .Append(" · 科目 ").Append(subject);
+
+            if (message.DeletedAt is not null)
+            {
+                builder.Append(" · 已撤回");
+            }
+            else if (message.ProcessedAt is null)
+            {
+                builder.Append(" · 未处理");
+            }
+
+            builder.Append('\n')
+                .Append("　").Append(message.SenderName ?? "未知").Append("：").Append(body)
+                .Append('\n');
+        }
+
+        builder.Append("绑定用 `/group-bind group:<群 ID> subject:<科目>`；一个群混多科时保持「未绑定」。");
+
+        var text = builder.ToString();
+        if (text.Length > DiscordText.MessageMax)
+        {
+            text = DiscordText.Clip(text, DiscordText.MessageMax - 10);
+        }
+
+        await ReplyAsync(command, text, ephemeral: true);
     }
 
     private async Task GroupsAsync(SocketSlashCommand command, CancellationToken ct)
