@@ -165,7 +165,8 @@ curl -i -X POST localhost:5000/line/webhook \
 ## 6. 首次配置流程（Discord 侧）
 
 1. 用日志里的邀请链接把 bot 加进服务器（`permissions=328565386320`，含「管理频道」以便自动建论坛标签；不要 Administrator）。
-2. 重启服务（或设好 `Discord__GuildId`），指令才会以服务器指令注册。
+2. 重启服务即可：启动时会给**每一个已加入的服务器**各注册一套服务器指令（`BulkOverwriteApplicationCommandAsync`，一次请求换掉整套，改名/删除的指令不会残留），之后新加入的服务器在 `GuildAvailable`/`JoinedGuild` 时自动补注册。`Discord__GuildId` 现在只影响日志里邀请链接的默认目标，不再决定指令注册范围；
+   启动时还会把旧的**全局指令集清空**——早期版本在「只有一个服务器」时会注册全局指令，全局那套不会跟着更新，会在所有服务器里压着新指令不显示。
 3. `/status` 确认供应商与模型。
 4. `/set-model gemini gemini-flash-lite-latest`
 5. 在 `#数学` 频道里打 `/subscribe 数学`；如果目标是一个论坛频道，同样在这里打，之后该科目的条目会发成论坛帖。

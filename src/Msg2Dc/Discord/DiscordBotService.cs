@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using Discord;
 using Discord.Net;
 using Discord.WebSocket;
@@ -21,6 +22,7 @@ public sealed class DiscordBotService : BackgroundService
     private readonly ILogger<DiscordBotService> _log;
 
     private readonly List<DateTime> _disconnectTimes = new();
+    private readonly ConcurrentDictionary<ulong, byte> _registeredGuilds = new();
 
     private ulong? _guildId;
     private DateTime _readySince = DateTime.MinValue;
@@ -148,6 +150,8 @@ public sealed class DiscordBotService : BackgroundService
         _client.Connected += OnConnectedAsync;
         _client.Disconnected += OnDisconnectedAsync;
         _client.Ready += OnReadyAsync;
+        _client.GuildAvailable += OnGuildAvailableAsync;
+        _client.JoinedGuild += OnGuildAvailableAsync;
         _client.SlashCommandExecuted += OnSlashCommandAsync;
         _wired = true;
     }
@@ -163,6 +167,8 @@ public sealed class DiscordBotService : BackgroundService
         _client.Connected -= OnConnectedAsync;
         _client.Disconnected -= OnDisconnectedAsync;
         _client.Ready -= OnReadyAsync;
+        _client.GuildAvailable -= OnGuildAvailableAsync;
+        _client.JoinedGuild -= OnGuildAvailableAsync;
         _client.SlashCommandExecuted -= OnSlashCommandAsync;
         _wired = false;
     }
@@ -433,71 +439,38 @@ public sealed class DiscordBotService : BackgroundService
                 return;
             }
 
-            var definitions = DiscordCommands.Build();
-
-            using var batchCancel = new CancellationTokenSource();
+            using var batchCancel = new CancellationTokenSource(TimeSpan.FromMinutes(1));
             _ = CancelWhenRateLimitedAsync(batchCancel);
 
-            var targetGuildId = _guildId;
-            if (targetGuildId is null && _client.Guilds.Count == 1)
+            var guilds = await WaitForGuildsAsync(batchCancel.Token);
+            if (guilds.Count == 0)
             {
-                targetGuildId = _client.Guilds.First().Id;
-                _log.LogInformation(
-                    "Discord:GuildId is empty; using the only joined guild {GuildId} for command registration",
-                    targetGuildId);
+                _log.LogWarning(
+                    "No guild is available yet; invite the bot to one: {InviteUrl}",
+                    BuildInviteUrl(_client.CurrentUser?.Id ?? 0, _guildId));
+                ScheduleRegistrationRetry();
+                return;
             }
 
-            if (targetGuildId is ulong guildId)
+            var allRegistered = true;
+            foreach (var guild in guilds)
             {
-                var guild = _client.GetGuild(guildId);
-                if (guild is null)
-                {
-                    await Task.Delay(TimeSpan.FromSeconds(2));
-                    guild = _client.GetGuild(guildId);
-                }
-
-                if (guild is null)
-                {
-                    _log.LogWarning(
-                        "Guild {GuildId} is not available; slash commands were not registered. Invite the bot first: {InviteUrl}",
-                        guildId, BuildInviteUrl(_client.CurrentUser?.Id ?? 0, guildId));
-                    return;
-                }
-
-                var registered = 0;
-                foreach (var (name, properties) in definitions)
-                {
-                    if (!await TryRegisterAsync(name, () => guild.CreateApplicationCommandAsync(properties, WriteOptions(batchCancel.Token))))
-                    {
-                        return;
-                    }
-
-                    registered++;
-                }
-
-                _log.LogInformation("Registered {Count} guild slash commands in guild {GuildId}",
-                    registered, guildId);
-            }
-            else
-            {
-                var registered = 0;
-                foreach (var (name, properties) in definitions)
-                {
-                    if (!await TryRegisterAsync(name, () => _client.CreateGlobalApplicationCommandAsync(properties, WriteOptions(batchCancel.Token))))
-                    {
-                        return;
-                    }
-
-                    registered++;
-                }
-
-                _log.LogInformation(
-                    "Registered {Count} global slash commands (Discord may take up to an hour to show them)",
-                    registered);
+                allRegistered &= await RegisterGuildCommandsAsync(guild, batchCancel.Token);
             }
 
-            complete = true;
-            Interlocked.Exchange(ref _registrationRetries, 0);
+            await ClearGlobalCommandsAsync(batchCancel.Token);
+
+            // A guild that failed must not mark the whole batch as done: the finally block
+            // clears the once-per-process flag so the scheduled retry can run again.
+            complete = allRegistered && _registeredGuilds.Count > 0;
+            if (complete)
+            {
+                Interlocked.Exchange(ref _registrationRetries, 0);
+            }
+            else if (!allRegistered)
+            {
+                ScheduleRegistrationRetry();
+            }
         }
         catch (Exception ex)
         {
@@ -511,6 +484,122 @@ public sealed class DiscordBotService : BackgroundService
                 Interlocked.Exchange(ref _registered, 0);
             }
         }
+    }
+
+    /// <summary>
+    /// READY arrives before the GUILD_CREATE burst, so the guild list is polled until it
+    /// stops growing. Registering into "whatever happens to be cached" is what left the
+    /// second server without the newer commands.
+    /// </summary>
+    private async Task<IReadOnlyList<SocketGuild>> WaitForGuildsAsync(CancellationToken ct)
+    {
+        var last = -1;
+        var stable = 0;
+
+        for (var attempt = 0; attempt < 30; attempt++)
+        {
+            var count = _client.Guilds.Count;
+            if (count > 0 && count == last)
+            {
+                if (++stable >= 2)
+                {
+                    break;
+                }
+            }
+            else
+            {
+                stable = 0;
+            }
+
+            last = count;
+
+            try
+            {
+                await Task.Delay(500, ct);
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+        }
+
+        return _client.Guilds.ToList();
+    }
+
+    /// <summary>
+    /// Registers the full command set in one guild, replacing whatever was there (so
+    /// renamed or removed commands do not linger). Tracked per guild so the guild events
+    /// do not repeat the work on every reconnect.
+    /// </summary>
+    private async Task<bool> RegisterGuildCommandsAsync(SocketGuild guild, CancellationToken ct)
+    {
+        if (!_registeredGuilds.TryAdd(guild.Id, 0))
+        {
+            return true;
+        }
+
+        var definitions = DiscordCommands.Build().Select(d => d.Properties).ToArray();
+
+        try
+        {
+            await guild.BulkOverwriteApplicationCommandAsync(definitions, WriteOptions(ct));
+            _log.LogInformation("Registered {Count} guild slash commands in guild {GuildId}",
+                definitions.Length, guild.Id);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _registeredGuilds.TryRemove(guild.Id, out _);
+            _log.LogWarning(ex,
+                "Could not register slash commands in guild {GuildId}; they stay as they are until the next attempt",
+                guild.Id);
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Earlier builds registered global commands when the bot happened to be in a single
+    /// guild. Those never update and stay visible in every server, shadowing the per-guild
+    /// set, so empty the global list.
+    /// </summary>
+    private async Task ClearGlobalCommandsAsync(CancellationToken ct)
+    {
+        try
+        {
+            await ((IDiscordClient)_client).BulkOverwriteGlobalApplicationCommand(
+                Array.Empty<ApplicationCommandProperties>(),
+                WriteOptions(ct));
+            _log.LogInformation("Cleared the global slash command set (per-guild commands are used)");
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "Could not clear the stale global slash commands");
+        }
+    }
+
+    private Task OnGuildAvailableAsync(SocketGuild guild)
+    {
+        if (_guard.IsBlocked)
+        {
+            _log.LogDebug(
+                "Skipping slash command registration for guild {GuildId} while rate limited",
+                guild.Id);
+            return Task.CompletedTask;
+        }
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await RegisterGuildCommandsAsync(guild, CancellationToken.None);
+            }
+            catch (Exception ex)
+            {
+                _log.LogDebug(ex, "Guild command registration for {GuildId} failed", guild.Id);
+            }
+        });
+
+        return Task.CompletedTask;
     }
 
     /// <summary>
@@ -574,39 +663,6 @@ public sealed class DiscordBotService : BackgroundService
         });
     }
 
-    private async Task<bool> TryRegisterAsync(string name, Func<Task> register)
-    {
-        try
-        {
-            await register();
-            return true;
-        }
-        catch (RateLimitedException)
-        {
-            _log.LogWarning(
-                "Slash command /{Command} hit a Discord rate limit; aborting this batch until the bucket resets",
-                name);
-            ScheduleRegistrationRetry();
-            return false;
-        }
-        catch (Exception ex) when (_guard.IsBlocked)
-        {
-            _log.LogWarning(
-                "Stopped registering slash commands at /{Command}: Discord rate limit is active ({Message})",
-                name, ex.Message);
-            ScheduleRegistrationRetry();
-            return false;
-        }
-        catch (Exception ex)
-        {
-            _log.LogError(ex, "Failed to register slash command /{Command}", name);
-
-            // A timeout or any other failure right after a 429 means the bucket is still
-            // hot; stop the batch instead of letting every command hammer it in turn.
-            return !_guard.IsBlocked;
-        }
-    }
-
     /// <summary>
     /// Registration has to wait for Discord.Net's client-side bucket between commands
     /// (roughly one command every few seconds), so RetryRatelimit stays on here.
@@ -623,7 +679,12 @@ public sealed class DiscordBotService : BackgroundService
 
     private static string BuildInviteUrl(ulong clientId, ulong? guildId)
     {
-        const long permissions = 1024 | 2048 | 8192 | 16384 | 32768 | 65536;
+        // ViewChannel | SendMessages | ManageMessages | EmbedLinks | AttachFiles |
+        // ReadMessageHistory | AddReactions | UseExternalEmojis | UseApplicationCommands |
+        // ManageChannels (forum tags) | ManageThreads | CreatePublicThreads | SendMessagesInThreads
+        const long permissions =
+            1024 | 2048 | 8192 | 16384 | 32768 | 65536 | 64 | 262144 |
+            2147483648 | 16 | 17179869184 | 34359738368 | 274877906944;
         var url = $"https://discord.com/oauth2/authorize?client_id={clientId}&permissions={permissions}&scope=bot%20applications.commands";
         return guildId is null ? url : $"{url}&guild_id={guildId}&disable_guild_select=true";
     }
