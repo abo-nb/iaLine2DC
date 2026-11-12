@@ -191,6 +191,7 @@ curl -i -X POST localhost:5000/line/webhook \
 用途：外部服务拿着 Discord 用户 ID 来问「这个人是不是这个服务器的成员」，bot 用私信发一个 4 位验证码，验证通过后换发 Bearer token。
 
 1. 管理员在目标频道打 `/verify-channel channel:#频道`。**这个频道的可见成员就是允许验证的人**（权限按频道覆盖计算，不是简单的角色名）。
+   - bot 在该频道需要：查看频道、发送消息、**创建私密线程**、**管理帖子**。最后一项用于删除验证线程——私密线程即使是 bot 自己建的，没有「管理帖子」也会 50013，过期线程就删不掉。`/verify-channel` 会检查并把这些缺失项列出来。
 2. `/verify-key` 查看给外部服务器用的 `X-Api-Key`；`/verify-key rotate:true` 轮换（旧的立刻失效）。
 
 接口（都在本服务上）：

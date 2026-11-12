@@ -435,6 +435,13 @@ public sealed class VerificationService
             // Already gone; nothing left to delete.
             return true;
         }
+        catch (global::Discord.Net.HttpException ex) when ((int)ex.HttpCode == 403)
+        {
+            _log.LogWarning(
+                "Cannot delete verification thread {ThreadId}: give the bot Manage Threads in the verification channel",
+                threadId);
+            return false;
+        }
         catch (Exception ex)
         {
             _log.LogWarning(ex, "Could not delete verification thread {ThreadId}", threadId);

@@ -805,8 +805,19 @@ public sealed class DiscordCommandHandler
 
         await _verify.SetChannelAsync(guildId, channel.Id, command.User.Id, ct);
 
+        var permissions = channel.Guild.CurrentUser.GetPermissions(channel);
+        var missing = new List<string>();
+        if (!permissions.ViewChannel) missing.Add("查看频道");
+        if (!permissions.SendMessages) missing.Add("发送消息");
+        if (!permissions.CreatePrivateThreads) missing.Add("创建私密线程");
+        if (!permissions.ManageThreads) missing.Add("管理帖子（过期后删除验证线程需要）");
+
+        var warning = missing.Count > 0
+            ? $"\n⚠️ bot 缺少权限：**{string.Join("、", missing)}**，否则验证码线程发不出或删不掉。"
+            : "";
+
         await ReplyAsync(command,
-            $"已把 <#{channel.Id}> 设为验证频道：所有能看到这个频道的成员都可以参与验证。\n" +
+            $"已把 <#{channel.Id}> 设为验证频道：所有能看到这个频道的成员都可以参与验证。{warning}\n" +
             "· 成员名单：`GET /api/verify/members`，请求头 `X-Api-Key`\n" +
             "· 发起验证：`POST /api/verify/request`，body `{\"userId\":\"...\"}`\n" +
             "· API Key：`/verify-key`",
