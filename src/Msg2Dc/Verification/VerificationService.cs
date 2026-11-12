@@ -250,7 +250,7 @@ public sealed class VerificationService
             ExpiresAt = now.Add(ttl)
         }, cancellationToken: ct);
 
-        var text = $"验证码：**{code}**\n{ttl.TotalMinutes:F0} 分钟内有效";
+        var text = $"身份验证码：{code}（{ttl.TotalMinutes:F0} 分钟内有效）";
 
         string delivery;
         try
@@ -382,7 +382,9 @@ public sealed class VerificationService
             options: Options(ct));
 
         await thread.AddUserAsync(user, Options(ct));
-        await thread.SendMessageAsync($"**{code}**", allowedMentions: AllowedMentions.None);
+        await thread.SendMessageAsync(
+            $"身份验证码：{code}（{ttl.TotalMinutes:F0} 分钟内有效）",
+            allowedMentions: AllowedMentions.None);
 
         return thread.Id.ToString();
     }
