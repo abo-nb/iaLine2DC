@@ -168,7 +168,17 @@ public sealed class VerificationService
         var rolePermissions = guild.Roles.ToDictionary(r => r.Id, r => r.Permissions.RawValue);
         var members = new List<VerifiedMember>();
 
-        var users = await ((IGuild)guild).GetUsersAsync(CacheMode.AllowDownload, Options(ct));
+        IReadOnlyCollection<IGuildUser> users;
+        try
+        {
+            users = await ((IGuild)guild).GetUsersAsync(CacheMode.AllowDownload, Options(ct));
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "Member listing failed for guild {GuildId}", setting.GuildId);
+            throw new VerificationException(503,
+                "无法枚举成员：需要在 Discord 开发者后台开启 Server Members Intent");
+        }
 
         foreach (var user in users)
         {
@@ -239,22 +249,43 @@ public sealed class VerificationService
             ExpiresAt = now.Add(ttl)
         }, cancellationToken: ct);
 
+        var text =
+            $"你的 Discord 身份验证码：**{code}**（{ttl.TotalMinutes:F0} 分钟内有效）\n" +
+            "如果不是你本人发起，请忽略这条消息。";
+
+        string delivery;
         try
         {
             var dm = await user.CreateDMChannelAsync(Options(ct));
-            await dm.SendMessageAsync(
-                $"你的 Discord 身份验证码：**{code}**（{ttl.TotalMinutes:F0} 分钟内有效）\n" +
-                "如果不是你本人发起，请忽略这条消息。");
+            await dm.SendMessageAsync(text);
+            delivery = "dm";
         }
         catch (Exception ex)
         {
-            _log.LogWarning(ex, "Could not DM verification code to {UserId}", userId);
-            await _store.VerificationCodes.DeleteOneAsync(
-                Builders<VerificationCodeDoc>.Filter.Eq(c => c.RequestId, requestId), ct);
-            throw new VerificationException(502, "无法发送私信，请确认允许服务器成员私信");
+            // Most often the member turned off "direct messages from server members".
+            // Fall back to a private thread in the configured channel, which only that
+            // member (and the bot) can read.
+            _log.LogInformation("DM to {UserId} failed ({Reason}); using a private thread", userId, ex.Message);
+
+            try
+            {
+                var threadId = await SendCodeInThreadAsync(setting, guild, user, code, ttl, ct);
+                await _store.VerificationCodes.UpdateOneAsync(
+                    Builders<VerificationCodeDoc>.Filter.Eq(c => c.RequestId, requestId),
+                    Builders<VerificationCodeDoc>.Update.Set(c => c.ThreadId, threadId),
+                    cancellationToken: ct);
+                delivery = "thread";
+            }
+            catch (Exception threadEx)
+            {
+                _log.LogError(threadEx, "Could not deliver verification code to {UserId}", userId);
+                await _store.VerificationCodes.DeleteOneAsync(
+                    Builders<VerificationCodeDoc>.Filter.Eq(c => c.RequestId, requestId), ct);
+                throw new VerificationException(502, "无法投递验证码：私信与私密线程都失败了");
+            }
         }
 
-        return new VerificationTicket(requestId, now.Add(ttl), "dm");
+        return new VerificationTicket(requestId, now.Add(ttl), delivery);
     }
 
     public async Task<VerificationTokens> ConfirmAsync(string requestId, string code, CancellationToken ct)
@@ -302,7 +333,57 @@ public sealed class VerificationService
             Builders<VerificationCodeDoc>.Update.Set(c => c.ConsumedAt, DateTime.UtcNow),
             cancellationToken: ct);
 
-        return await IssueTokensAsync(request.UserId, request.GuildId, setting, ct);
+        var tokens = await IssueTokensAsync(request.UserId, request.GuildId, setting, ct);
+
+        if (!string.IsNullOrWhiteSpace(request.ThreadId) && ulong.TryParse(request.ThreadId, out var threadId))
+        {
+            try
+            {
+                if (await _client.Rest.GetChannelAsync(threadId, Options(ct)) is IDeletable deletable)
+                {
+                    await deletable.DeleteAsync();
+                }
+            }
+            catch (Exception ex)
+            {
+                _log.LogDebug(ex, "Could not delete verification thread {ThreadId}", request.ThreadId);
+            }
+        }
+
+        return tokens;
+    }
+
+    /// <summary>
+    /// Falls back to a private thread in the configured channel when the member cannot be
+    /// DM'd; only the member and the bot can read it, and it is deleted after confirmation.
+    /// </summary>
+    private async Task<string> SendCodeInThreadAsync(
+        VerificationSettingDoc setting,
+        RestGuild guild,
+        RestGuildUser user,
+        string code,
+        TimeSpan ttl,
+        CancellationToken ct)
+    {
+        if (await guild.GetChannelAsync(ParseId(setting.ChannelId, "channelId"), Options(ct)) is not ITextChannel channel)
+        {
+            throw new VerificationException(502, "验证频道不是文字频道，无法建立私密线程");
+        }
+
+        var thread = await channel.CreateThreadAsync(
+            $"验证 · {user.Username}",
+            ThreadType.PrivateThread,
+            autoArchiveDuration: ThreadArchiveDuration.OneHour,
+            invitable: false,
+            options: Options(ct));
+
+        await thread.AddUserAsync(user, Options(ct));
+        await thread.SendMessageAsync(
+            $"<@{user.Id}> 你的 Discord 身份验证码：**{code}**（{ttl.TotalMinutes:F0} 分钟内有效）\n" +
+            "验证成功后这个线程会自动删除。",
+            allowedMentions: AllowedMentions.None);
+
+        return thread.Id.ToString();
     }
 
     public async Task<VerificationTokens> RefreshAsync(string refreshToken, CancellationToken ct)

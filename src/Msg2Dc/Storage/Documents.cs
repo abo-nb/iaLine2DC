@@ -195,6 +195,7 @@ public sealed class VerificationCodeDoc
     public string ChannelId { get; set; } = "";
     public string UserId { get; set; } = "";
     public string CodeHash { get; set; } = "";
+    public string? ThreadId { get; set; }
     public int Attempts { get; set; }
     public DateTime CreatedAt { get; set; }
     public DateTime ExpiresAt { get; set; }
