@@ -206,7 +206,8 @@ curl -i -X POST localhost:5000/line/webhook \
 
 约束与实现要点：
 
-- Discord 没有「频道内只给某个人看」的消息，所以验证码走**私信**；用户关闭了服务器成员私信时会返回 502，让他去隐私设置里打开。
+- Discord 没有「频道内只给某个人看」的消息，所以验证码优先走**私信**；对方关了「服务器成员私信」时（错误 50278），自动改成在那个频道里开一个**只有他可见的私密线程**放验证码，验证成功后线程自动删除。返回里的 `delivery` 会告诉调用方是 `dm` 还是 `thread`。
+- **成员枚举需要在 Discord 开发者后台打开 Server Members Intent**（Applications → 你的应用 → Bot → Privileged Gateway Intents）。没开时 `/api/verify/members` 返回 503 并提示这一条；这只是应用级开关，**不需要**改网关 intents，所以不会影响机器人上线。
 - 验证码 4 位、全大写、字母+数字各两个（去掉 0/O/1/I），5 分钟有效，同一用户 60 秒内只能请求一次，单个验证码最多错 5 次。
 - 验证码和 token 都只存 SHA-256 哈希；refresh token 每次使用即轮换，旧 access token 同时作废。
 - 成员枚举走 REST 分页拉成员 + 按频道覆盖算权限（`ViewChannel` 位），大服务器会比较慢，但不会把成员列表写进缓存。
