@@ -362,6 +362,11 @@ public sealed class VerificationService
             .Limit(50)
             .ToListAsync(ct);
 
+        if (stale.Count > 0)
+        {
+            _log.LogInformation("Found {Count} expired verification code(s) to clean up", stale.Count);
+        }
+
         var deleted = 0;
         foreach (var code in stale)
         {
@@ -432,7 +437,7 @@ public sealed class VerificationService
         }
         catch (Exception ex)
         {
-            _log.LogDebug(ex, "Could not delete verification thread {ThreadId}", threadId);
+            _log.LogWarning(ex, "Could not delete verification thread {ThreadId}", threadId);
             return false;
         }
     }

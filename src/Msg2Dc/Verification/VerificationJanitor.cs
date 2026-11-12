@@ -19,6 +19,8 @@ public sealed class VerificationJanitor : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        _log.LogInformation("Verification janitor started (sweep every {Minutes} min)", Interval.TotalMinutes);
+
         while (!stoppingToken.IsCancellationRequested)
         {
             try
