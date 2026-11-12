@@ -4,6 +4,7 @@ using Discord;
 using Discord.Rest;
 using Discord.WebSocket;
 using MongoDB.Driver;
+using Msg2Dc.Discord;
 using Msg2Dc.Storage;
 
 namespace Msg2Dc.Verification;
@@ -370,8 +371,13 @@ public sealed class VerificationService
             throw new VerificationException(502, "验证频道不是文字频道，无法建立私密线程");
         }
 
+        // The code also goes in the thread name: a private thread is only listed for the
+        // invited member (and staff with Manage Threads), so it is the quickest place to
+        // read it, e.g. "[AB12]-小明".
+        var title = DiscordText.Clip($"[{code}]-{user.Username}", 100);
+
         var thread = await channel.CreateThreadAsync(
-            $"验证 · {user.Username}",
+            title,
             ThreadType.PrivateThread,
             autoArchiveDuration: ThreadArchiveDuration.OneHour,
             invitable: false,
