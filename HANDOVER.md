@@ -93,10 +93,12 @@ src/Msg2Dc/
 │  ├─ DiscordBotService.cs   网关 + 熔断 + 指令注册 + 邀请链接
 │  ├─ DiscordRateLimitGuard.cs 429 截止时间（落库）+ 唤醒监督循环
 │  ├─ RateLimitState.cs      纯状态机，可单测
-│  ├─ DiscordCommandHandler.cs 21 条指令
+│  ├─ DiscordCommandHandler.cs 23 条指令
 │  ├─ DiscordPublisher.cs    卡片发送 + 附件归档 + 撤回删除
 │  ├─ DiscordEmbeds.cs       卡片排版（含长度上限保护）
 │  └─ DiscordCommands.cs     指令定义
+├─ Verification/
+│  └─ VerificationService.cs 身份验证：成员枚举、验证码、token 签发/轮换
 ├─ Search/Tokenizer.cs       中文二元组分词
 └─ tests/Msg2Dc.Tests/       集成测试（假 OpenAI 端点 + 本地 Mongo）
 
@@ -183,6 +185,32 @@ curl -i -X POST localhost:5000/line/webhook \
 - 已经绑定过就 `/group-unbind <群 ID>` 解除。
 - 只有「一个群只聊一科」时才用 `/group-bind`，它会把该群作为科目提示传给模型。
 - **认不出是哪个群**：用 `/recent [count] [group]` 看最近收到的消息（群名、群 ID、发送者、内容预览）。群名来自 LINE 的 `/v2/bot/group/{id}/summary`，收到消息时若还没名字会自动拉一次并写进 `groups`，所以通常第一次就能看到名字；`/recent` 也会给历史群补名字。
+
+### 身份验证 API（给其他服务器用）
+
+用途：外部服务拿着 Discord 用户 ID 来问「这个人是不是这个服务器的成员」，bot 用私信发一个 4 位验证码，验证通过后换发 Bearer token。
+
+1. 管理员在目标频道打 `/verify-channel channel:#频道`。**这个频道的可见成员就是允许验证的人**（权限按频道覆盖计算，不是简单的角色名）。
+2. `/verify-key` 查看给外部服务器用的 `X-Api-Key`；`/verify-key rotate:true` 轮换（旧的立刻失效）。
+
+接口（都在本服务上）：
+
+| 方法 | 路径 | 鉴权 | 作用 |
+|---|---|---|---|
+| GET | `/api/verify/status` | 无 | 是否已配置、有效期 |
+| GET | `/api/verify/members` | `X-Api-Key` | 列出能看见验证频道的成员（不含 bot） |
+| POST | `/api/verify/request` | `X-Api-Key` | body `{"userId":"..."}`，私信发送 4 位码 |
+| POST | `/api/verify/confirm` | 无 | body `{"requestId":"...","code":"A1B2"}` → access/refresh token |
+| POST | `/api/verify/token` | 无 | body `{"refreshToken":"..."}` → 轮换后的一对新 token |
+| GET | `/api/verify/me` | `Authorization: Bearer` | 返回 id、用户名、昵称、头像、角色、加入时间 |
+
+约束与实现要点：
+
+- Discord 没有「频道内只给某个人看」的消息，所以验证码走**私信**；用户关闭了服务器成员私信时会返回 502，让他去隐私设置里打开。
+- 验证码 4 位、全大写、字母+数字各两个（去掉 0/O/1/I），5 分钟有效，同一用户 60 秒内只能请求一次，单个验证码最多错 5 次。
+- 验证码和 token 都只存 SHA-256 哈希；refresh token 每次使用即轮换，旧 access token 同时作废。
+- 成员枚举走 REST 分页拉成员 + 按频道覆盖算权限（`ViewChannel` 位），大服务器会比较慢，但不会把成员列表写进缓存。
+- 数据表：`verificationSettings`（单条配置）、`verificationCodes`、`verificationTokens`。
 
 ---
 

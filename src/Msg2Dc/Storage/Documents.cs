@@ -168,3 +168,48 @@ public sealed class LlmLogDoc
     public string? Error { get; set; }
     public DateTime CreatedAt { get; set; }
 }
+
+/// <summary>
+/// Single document: which channel is used for identity verification, plus the API key the
+/// relying party has to present.
+/// </summary>
+public sealed class VerificationSettingDoc
+{
+    public ObjectId Id { get; set; }
+    public string GuildId { get; set; } = "";
+    public string ChannelId { get; set; } = "";
+    public string ApiKey { get; set; } = "";
+    public int CodeTtlMinutes { get; set; } = 5;
+    public int AccessTokenMinutes { get; set; } = 60;
+    public int RefreshTokenDays { get; set; } = 30;
+    public DateTime CreatedAt { get; set; }
+    public DateTime UpdatedAt { get; set; }
+    public string UpdatedBy { get; set; } = "";
+}
+
+public sealed class VerificationCodeDoc
+{
+    public ObjectId Id { get; set; }
+    public string RequestId { get; set; } = "";
+    public string GuildId { get; set; } = "";
+    public string ChannelId { get; set; } = "";
+    public string UserId { get; set; } = "";
+    public string CodeHash { get; set; } = "";
+    public int Attempts { get; set; }
+    public DateTime CreatedAt { get; set; }
+    public DateTime ExpiresAt { get; set; }
+    public DateTime? ConsumedAt { get; set; }
+}
+
+public sealed class VerificationTokenDoc
+{
+    public ObjectId Id { get; set; }
+    public string UserId { get; set; } = "";
+    public string GuildId { get; set; } = "";
+    public string AccessTokenHash { get; set; } = "";
+    public string RefreshTokenHash { get; set; } = "";
+    public DateTime AccessExpiresAt { get; set; }
+    public DateTime RefreshExpiresAt { get; set; }
+    public DateTime CreatedAt { get; set; }
+    public DateTime? RevokedAt { get; set; }
+}

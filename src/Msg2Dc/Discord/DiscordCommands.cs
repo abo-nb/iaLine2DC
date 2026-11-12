@@ -13,7 +13,7 @@ public static class DiscordCommands
     {
         "subscribe", "subscribe-all", "unsubscribe", "unsubscribe-all", "subscriptions",
         "subject-add", "subject-remove", "subject-alias", "subjects",
-        "set-archive", "set-default",
+        "set-archive", "set-default", "verify-channel", "verify-key",
         "groups", "recent", "group-bind", "group-unbind",
         "set-model", "reprocess", "status"
     };
@@ -109,6 +109,21 @@ public static class DiscordCommands
                 .WithName("set-default")
                 .WithDescription("设置没有订阅科目时的默认推送频道（可以是论坛）")
                 .AddOption(Channel("channel", "默认推送频道/论坛", allowForum: true))
+                .Build()),
+
+            ("verify-channel", (ApplicationCommandProperties)new SlashCommandBuilder()
+                .WithName("verify-channel")
+                .WithDescription("设置身份验证用的频道（该频道的可见成员即可验证；不填则查看当前配置）")
+                .AddOption(Channel("channel", "验证频道", required: false))
+                .Build()),
+
+            ("verify-key", (ApplicationCommandProperties)new SlashCommandBuilder()
+                .WithName("verify-key")
+                .WithDescription("查看或轮换身份验证 API Key（仅管理员可见）")
+                .AddOption(new SlashCommandOptionBuilder()
+                    .WithName("rotate")
+                    .WithDescription("轮换一个新的 API Key（旧的立即失效）")
+                    .WithType(ApplicationCommandOptionType.Boolean))
                 .Build()),
 
             ("groups", (ApplicationCommandProperties)new SlashCommandBuilder()

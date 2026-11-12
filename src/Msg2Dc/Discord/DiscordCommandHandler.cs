@@ -8,6 +8,7 @@ using Msg2Dc.Configuration;
 using Msg2Dc.Line;
 using Msg2Dc.Search;
 using Msg2Dc.Storage;
+using Msg2Dc.Verification;
 
 namespace Msg2Dc.Discord;
 
@@ -19,6 +20,7 @@ public sealed class DiscordCommandHandler
     private readonly RuntimeOptions _runtime;
     private readonly DiscordSocketClient _client;
     private readonly LineApiClient _line;
+    private readonly VerificationService _verify;
     private readonly ILogger<DiscordCommandHandler> _log;
 
     public DiscordCommandHandler(
@@ -28,6 +30,7 @@ public sealed class DiscordCommandHandler
         RuntimeOptions runtime,
         DiscordSocketClient client,
         LineApiClient line,
+        VerificationService verify,
         ILogger<DiscordCommandHandler> log)
     {
         _store = store;
@@ -36,6 +39,7 @@ public sealed class DiscordCommandHandler
         _runtime = runtime;
         _client = client;
         _line = line;
+        _verify = verify;
         _log = log;
     }
 
@@ -97,6 +101,12 @@ public sealed class DiscordCommandHandler
                     break;
                 case "set-default":
                     await SetChannelAsync(command, archive: false, ct);
+                    break;
+                case "verify-channel":
+                    await VerifyChannelAsync(command, ct);
+                    break;
+                case "verify-key":
+                    await VerifyKeyAsync(command, ct);
                     break;
                 case "groups":
                     await GroupsAsync(command, ct);
@@ -767,6 +777,65 @@ public sealed class DiscordCommandHandler
         await ReplyAsync(command, text, ephemeral: true);
     }
 
+    private async Task VerifyChannelAsync(SocketSlashCommand command, CancellationToken ct)
+    {
+        var channelId = OptionChannelId(command, "channel");
+        if (channelId is null)
+        {
+            var current = await _verify.GetSettingAsync(ct);
+            await ReplyAsync(command,
+                current is null
+                    ? "尚未配置验证频道。用法：`/verify-channel channel:#频道`"
+                    : $"**验证频道**：<#{current.ChannelId}>\n服务器 `{current.GuildId}` · 验证码 {current.CodeTtlMinutes} 分钟 · access token {current.AccessTokenMinutes} 分钟 · refresh token {current.RefreshTokenDays} 天\nAPI Key 用 `/verify-key` 查看。",
+                ephemeral: true);
+            return;
+        }
+
+        if (command.GuildId is not ulong guildId)
+        {
+            await ReplyAsync(command, "该命令只能在服务器频道中使用。", ephemeral: true);
+            return;
+        }
+
+        if (_client.GetChannel(channelId.Value) is not SocketGuildChannel channel)
+        {
+            await ReplyAsync(command, "找不到该频道。", ephemeral: true);
+            return;
+        }
+
+        await _verify.SetChannelAsync(guildId, channel.Id, command.User.Id, ct);
+
+        await ReplyAsync(command,
+            $"已把 <#{channel.Id}> 设为验证频道：所有能看到这个频道的成员都可以参与验证。\n" +
+            "· 成员名单：`GET /api/verify/members`，请求头 `X-Api-Key`\n" +
+            "· 发起验证：`POST /api/verify/request`，body `{\"userId\":\"...\"}`\n" +
+            "· API Key：`/verify-key`",
+            ephemeral: true);
+    }
+
+    private async Task VerifyKeyAsync(SocketSlashCommand command, CancellationToken ct)
+    {
+        var rotate = OptionBool(command, "rotate") ?? false;
+        var setting = await _verify.GetSettingAsync(ct);
+
+        if (setting is null)
+        {
+            await ReplyAsync(command, "尚未配置验证频道，先执行 `/verify-channel channel:#频道`。", ephemeral: true);
+            return;
+        }
+
+        if (rotate)
+        {
+            setting = await _verify.RotateApiKeyAsync(ct);
+        }
+
+        await ReplyAsync(command,
+            (rotate ? "已轮换 API Key，旧的立即失效。\n" : "") +
+            $"API Key：`{setting!.ApiKey}`\n" +
+            "只发给可信的服务器——拿到它就等于可以枚举成员并触发验证。",
+            ephemeral: true);
+    }
+
     private async Task GroupsAsync(SocketSlashCommand command, CancellationToken ct)
     {
         var groups = await _store.Groups
@@ -1114,6 +1183,9 @@ public sealed class DiscordCommandHandler
             _ => null
         };
     }
+
+    private static bool? OptionBool(SocketSlashCommand command, string name) =>
+        FindOption(command, name)?.Value as bool?;
 
     private static ulong? OptionChannelId(SocketSlashCommand command, string name)
     {

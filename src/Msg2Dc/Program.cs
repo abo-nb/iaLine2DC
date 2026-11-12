@@ -9,6 +9,7 @@ using Msg2Dc.Line;
 using Msg2Dc.Llm;
 using Msg2Dc.Pipeline;
 using Msg2Dc.Storage;
+using Msg2Dc.Verification;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -28,6 +29,7 @@ builder.Services.AddSingleton<LineApiClient>();
 
 builder.Services.AddLlmModule();
 builder.Services.AddDiscordModule();
+builder.Services.AddSingleton<VerificationService>();
 
 builder.Services.AddHostedService<MongoInitializer>();
 builder.Services.AddHostedService<MessageWorker>();
@@ -133,6 +135,139 @@ app.MapPost("/line/webhook", async (
     }
 });
 
+// ─── 身份验证 API（给其他服务器用）───────────────────────────────
+// 成员名单和发起验证需要 X-Api-Key（管理员用 /verify-key 查看）；
+// confirm / token / me 只需要各自拿到的东西，不再要求 API Key。
+
+app.MapGet("/api/verify/status", async (VerificationService verify, CancellationToken ct) =>
+{
+    var setting = await verify.GetSettingAsync(ct);
+    return Results.Ok(new
+    {
+        configured = setting is not null,
+        guildId = setting?.GuildId,
+        channelId = setting?.ChannelId,
+        codeTtlMinutes = setting?.CodeTtlMinutes,
+        accessTokenMinutes = setting?.AccessTokenMinutes,
+        refreshTokenDays = setting?.RefreshTokenDays
+    });
+});
+
+app.MapGet("/api/verify/members", async (
+    HttpRequest request,
+    VerificationService verify,
+    CancellationToken ct) =>
+{
+    if (!await verify.IsApiKeyValidAsync(request.Headers["X-Api-Key"], ct))
+    {
+        return Results.Json(new { error = "invalid api key" }, statusCode: StatusCodes.Status401Unauthorized);
+    }
+
+    try
+    {
+        var (setting, members) = await verify.ListMembersAsync(ct);
+        return Results.Ok(new
+        {
+            guildId = setting.GuildId,
+            channelId = setting.ChannelId,
+            count = members.Count,
+            members
+        });
+    }
+    catch (VerificationException ex)
+    {
+        return VerifyError(ex);
+    }
+});
+
+app.MapPost("/api/verify/request", async (
+    HttpRequest request,
+    VerificationService verify,
+    CancellationToken ct) =>
+{
+    if (!await verify.IsApiKeyValidAsync(request.Headers["X-Api-Key"], ct))
+    {
+        return Results.Json(new { error = "invalid api key" }, statusCode: StatusCodes.Status401Unauthorized);
+    }
+
+    var body = await request.ReadFromJsonAsync<VerifyRequestBody>(jsonOptions, ct);
+    if (body is null || string.IsNullOrWhiteSpace(body.UserId))
+    {
+        return Results.BadRequest(new { error = "userId 不能为空" });
+    }
+
+    try
+    {
+        return Results.Ok(await verify.CreateRequestAsync(body.UserId, ct));
+    }
+    catch (VerificationException ex)
+    {
+        return VerifyError(ex);
+    }
+});
+
+app.MapPost("/api/verify/confirm", async (
+    HttpRequest request,
+    VerificationService verify,
+    CancellationToken ct) =>
+{
+    var body = await request.ReadFromJsonAsync<VerifyConfirmBody>(jsonOptions, ct);
+    if (body is null)
+    {
+        return Results.BadRequest(new { error = "请求体不能为空" });
+    }
+
+    try
+    {
+        return Results.Ok(await verify.ConfirmAsync(body.RequestId ?? "", body.Code ?? "", ct));
+    }
+    catch (VerificationException ex)
+    {
+        return VerifyError(ex);
+    }
+});
+
+app.MapPost("/api/verify/token", async (
+    HttpRequest request,
+    VerificationService verify,
+    CancellationToken ct) =>
+{
+    var body = await request.ReadFromJsonAsync<VerifyRefreshBody>(jsonOptions, ct);
+    if (body is null || string.IsNullOrWhiteSpace(body.RefreshToken))
+    {
+        return Results.BadRequest(new { error = "refreshToken 不能为空" });
+    }
+
+    try
+    {
+        return Results.Ok(await verify.RefreshAsync(body.RefreshToken, ct));
+    }
+    catch (VerificationException ex)
+    {
+        return VerifyError(ex);
+    }
+});
+
+app.MapGet("/api/verify/me", async (
+    HttpRequest request,
+    VerificationService verify,
+    CancellationToken ct) =>
+{
+    var header = request.Headers.Authorization.ToString();
+    var token = header.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase)
+        ? header["Bearer ".Length..].Trim()
+        : "";
+
+    try
+    {
+        return Results.Ok(await verify.GetUserAsync(token, ct));
+    }
+    catch (VerificationException ex)
+    {
+        return VerifyError(ex);
+    }
+});
+
 app.MapGet("/", () => Results.Redirect("/healthz"));
 
 app.MapGet("/diag/discord", async (CancellationToken ct) =>
@@ -174,4 +309,13 @@ app.MapGet("/diag/discord", async (CancellationToken ct) =>
     return Results.Json(new { egressIp, probes });
 });
 
+static IResult VerifyError(VerificationException ex) =>
+    Results.Json(new { error = ex.Message }, statusCode: ex.StatusCode);
+
 app.Run();
+
+public sealed record VerifyRequestBody(string UserId);
+
+public sealed record VerifyConfirmBody(string? RequestId, string? Code);
+
+public sealed record VerifyRefreshBody(string? RefreshToken);

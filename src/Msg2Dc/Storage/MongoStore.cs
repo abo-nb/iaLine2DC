@@ -29,6 +29,9 @@ public sealed class MongoStore
     public IMongoCollection<JobDoc> Jobs => _db.GetCollection<JobDoc>("jobs");
     public IMongoCollection<LlmLogDoc> LlmLogs => _db.GetCollection<LlmLogDoc>("llmLogs");
     public IMongoCollection<SystemStateDoc> SystemStates => _db.GetCollection<SystemStateDoc>("systemState");
+    public IMongoCollection<VerificationSettingDoc> VerificationSettings => _db.GetCollection<VerificationSettingDoc>("verificationSettings");
+    public IMongoCollection<VerificationCodeDoc> VerificationCodes => _db.GetCollection<VerificationCodeDoc>("verificationCodes");
+    public IMongoCollection<VerificationTokenDoc> VerificationTokens => _db.GetCollection<VerificationTokenDoc>("verificationTokens");
 
     public async Task EnsureIndexesAsync(CancellationToken ct)
     {
@@ -89,6 +92,21 @@ public sealed class MongoStore
 
         await SystemStates.Indexes.CreateOneAsync(
             new CreateIndexModel<SystemStateDoc>(Builders<SystemStateDoc>.IndexKeys.Ascending(s => s.Key),
+                new CreateIndexOptions { Unique = true }), cancellationToken: ct);
+
+        await VerificationCodes.Indexes.CreateOneAsync(
+            new CreateIndexModel<VerificationCodeDoc>(Builders<VerificationCodeDoc>.IndexKeys.Ascending(c => c.RequestId),
+                new CreateIndexOptions { Unique = true }), cancellationToken: ct);
+
+        await VerificationCodes.Indexes.CreateOneAsync(
+            new CreateIndexModel<VerificationCodeDoc>(Builders<VerificationCodeDoc>.IndexKeys.Ascending(c => c.UserId)), cancellationToken: ct);
+
+        await VerificationTokens.Indexes.CreateOneAsync(
+            new CreateIndexModel<VerificationTokenDoc>(Builders<VerificationTokenDoc>.IndexKeys.Ascending(t => t.AccessTokenHash),
+                new CreateIndexOptions { Unique = true }), cancellationToken: ct);
+
+        await VerificationTokens.Indexes.CreateOneAsync(
+            new CreateIndexModel<VerificationTokenDoc>(Builders<VerificationTokenDoc>.IndexKeys.Ascending(t => t.RefreshTokenHash),
                 new CreateIndexOptions { Unique = true }), cancellationToken: ct);
     }
 

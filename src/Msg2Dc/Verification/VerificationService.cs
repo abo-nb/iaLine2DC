@@ -1,0 +1,528 @@
+using System.Security.Cryptography;
+using System.Text;
+using Discord;
+using Discord.Rest;
+using Discord.WebSocket;
+using MongoDB.Driver;
+using Msg2Dc.Storage;
+
+namespace Msg2Dc.Verification;
+
+public sealed record VerifiedMember(
+    string Id,
+    string Username,
+    string? GlobalName,
+    string? Nickname,
+    string? AvatarUrl);
+
+public sealed record VerifiedRole(string Id, string Name);
+
+public sealed record VerificationUser(
+    string Id,
+    string Username,
+    string? GlobalName,
+    string? Nickname,
+    string? AvatarUrl,
+    string GuildId,
+    IReadOnlyList<VerifiedRole> Roles,
+    DateTime? JoinedAt);
+
+public sealed record VerificationTicket(string RequestId, DateTime ExpiresAt, string Delivery);
+
+public sealed record VerificationTokens(string AccessToken, string RefreshToken, int ExpiresIn);
+
+/// <summary>
+/// Carries an HTTP status so the endpoints can answer without translating every failure.
+/// </summary>
+public sealed class VerificationException : Exception
+{
+    public VerificationException(int statusCode, string message) : base(message)
+    {
+        StatusCode = statusCode;
+    }
+
+    public int StatusCode { get; }
+}
+
+/// <summary>
+/// Discord-side identity verification for other services: pick a channel, list the members
+/// who can see it, DM one of them a short code, and swap that code for bearer tokens.
+/// The relying party only ever starts the flow with a Discord user id it already has.
+/// </summary>
+public sealed class VerificationService
+{
+    private const ulong AdministratorBit = 1UL << 3;
+    private const ulong ViewChannelBit = 1UL << 10;
+    private const int MaxAttempts = 5;
+
+    // Excludes look-alikes (0/O, 1/I) so a code read off a phone is unambiguous.
+    private const string LetterAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ";
+    private const string DigitAlphabet = "23456789";
+
+    private static readonly TimeSpan RequestCooldown = TimeSpan.FromSeconds(60);
+
+    private readonly MongoStore _store;
+    private readonly DiscordSocketClient _client;
+    private readonly ILogger<VerificationService> _log;
+
+    public VerificationService(
+        MongoStore store,
+        DiscordSocketClient client,
+        ILogger<VerificationService> log)
+    {
+        _store = store;
+        _client = client;
+        _log = log;
+    }
+
+    public async Task<VerificationSettingDoc?> GetSettingAsync(CancellationToken ct) =>
+        await _store.VerificationSettings
+            .Find(Builders<VerificationSettingDoc>.Filter.Empty)
+            .FirstOrDefaultAsync(ct);
+
+    public async Task<VerificationSettingDoc> SetChannelAsync(
+        ulong guildId,
+        ulong channelId,
+        ulong userId,
+        CancellationToken ct)
+    {
+        var existing = await GetSettingAsync(ct);
+        var now = DateTime.UtcNow;
+
+        var setting = new VerificationSettingDoc
+        {
+            GuildId = guildId.ToString(),
+            ChannelId = channelId.ToString(),
+            ApiKey = string.IsNullOrWhiteSpace(existing?.ApiKey) ? NewSecret(24) : existing!.ApiKey,
+            CodeTtlMinutes = existing?.CodeTtlMinutes ?? 5,
+            AccessTokenMinutes = existing?.AccessTokenMinutes ?? 60,
+            RefreshTokenDays = existing?.RefreshTokenDays ?? 30,
+            CreatedAt = existing?.CreatedAt ?? now,
+            UpdatedAt = now,
+            UpdatedBy = userId.ToString()
+        };
+
+        setting.Id = existing?.Id ?? default;
+
+        await _store.VerificationSettings.ReplaceOneAsync(
+            Builders<VerificationSettingDoc>.Filter.Empty,
+            setting,
+            new ReplaceOptions { IsUpsert = true },
+            ct);
+
+        return setting;
+    }
+
+    public async Task<VerificationSettingDoc?> RotateApiKeyAsync(CancellationToken ct)
+    {
+        var existing = await GetSettingAsync(ct);
+        if (existing is null)
+        {
+            return null;
+        }
+
+        existing.ApiKey = NewSecret(24);
+        existing.UpdatedAt = DateTime.UtcNow;
+
+        await _store.VerificationSettings.ReplaceOneAsync(
+            Builders<VerificationSettingDoc>.Filter.Eq(s => s.Id, existing.Id),
+            existing,
+            cancellationToken: ct);
+
+        return existing;
+    }
+
+    public async Task<bool> IsApiKeyValidAsync(string? apiKey, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(apiKey))
+        {
+            return false;
+        }
+
+        var setting = await GetSettingAsync(ct);
+        if (setting is null || string.IsNullOrWhiteSpace(setting.ApiKey))
+        {
+            return false;
+        }
+
+        var expected = Encoding.UTF8.GetBytes(setting.ApiKey);
+        var actual = Encoding.UTF8.GetBytes(apiKey.Trim());
+
+        return expected.Length == actual.Length && CryptographicOperations.FixedTimeEquals(expected, actual);
+    }
+
+    /// <summary>
+    /// Everyone in the configured guild who can view the configured channel. Discord has no
+    /// "members of a channel" endpoint, so the guild member list is paged and the effective
+    /// permission of each member is computed against the channel overwrites.
+    /// </summary>
+    public async Task<(VerificationSettingDoc Setting, IReadOnlyList<VerifiedMember> Members)> ListMembersAsync(
+        CancellationToken ct)
+    {
+        var setting = await GetSettingAsync(ct)
+                      ?? throw new VerificationException(404, "尚未配置验证频道");
+        var guild = await GetGuildAsync(setting, ct);
+        var channel = await guild.GetChannelAsync(ParseId(setting.ChannelId, "channelId"), Options(ct))
+                      ?? throw new VerificationException(404, "验证频道不存在");
+
+        var rolePermissions = guild.Roles.ToDictionary(r => r.Id, r => r.Permissions.RawValue);
+        var members = new List<VerifiedMember>();
+
+        var users = await ((IGuild)guild).GetUsersAsync(CacheMode.AllowDownload, Options(ct));
+
+        foreach (var user in users)
+        {
+            if (user.IsBot || !CanView(user, guild, channel, rolePermissions))
+            {
+                continue;
+            }
+
+            members.Add(new VerifiedMember(
+                user.Id.ToString(),
+                user.Username,
+                user.GlobalName,
+                user.Nickname,
+                user.GetAvatarUrl()));
+        }
+
+        return (setting, members);
+    }
+
+    public async Task<VerificationTicket> CreateRequestAsync(string userId, CancellationToken ct)
+    {
+        var setting = await GetSettingAsync(ct)
+                      ?? throw new VerificationException(404, "尚未配置验证频道");
+        var uid = ParseId(userId, "userId");
+        var guild = await GetGuildAsync(setting, ct);
+
+        RestGuildUser? user;
+        try
+        {
+            user = await guild.GetUserAsync(uid, Options(ct));
+        }
+        catch (Exception ex)
+        {
+            _log.LogDebug(ex, "Member lookup failed for {UserId}", userId);
+            user = null;
+        }
+
+        if (user is null)
+        {
+            throw new VerificationException(404, "该用户不在服务器中");
+        }
+
+        var cutoff = DateTime.UtcNow.Subtract(RequestCooldown);
+        var recent = await _store.VerificationCodes
+            .Find(Builders<VerificationCodeDoc>.Filter.And(
+                Builders<VerificationCodeDoc>.Filter.Eq(c => c.UserId, userId),
+                Builders<VerificationCodeDoc>.Filter.Gte(c => c.CreatedAt, cutoff)))
+            .FirstOrDefaultAsync(ct);
+
+        if (recent is not null)
+        {
+            throw new VerificationException(429, "请求过于频繁，请稍后再试");
+        }
+
+        var code = NewCode();
+        var requestId = Guid.NewGuid().ToString("N");
+        var now = DateTime.UtcNow;
+        var ttl = TimeSpan.FromMinutes(Math.Clamp(setting.CodeTtlMinutes, 1, 30));
+
+        await _store.VerificationCodes.InsertOneAsync(new VerificationCodeDoc
+        {
+            RequestId = requestId,
+            GuildId = setting.GuildId,
+            ChannelId = setting.ChannelId,
+            UserId = userId,
+            CodeHash = HashCode(requestId, code),
+            CreatedAt = now,
+            ExpiresAt = now.Add(ttl)
+        }, cancellationToken: ct);
+
+        try
+        {
+            var dm = await user.CreateDMChannelAsync(Options(ct));
+            await dm.SendMessageAsync(
+                $"你的 Discord 身份验证码：**{code}**（{ttl.TotalMinutes:F0} 分钟内有效）\n" +
+                "如果不是你本人发起，请忽略这条消息。");
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "Could not DM verification code to {UserId}", userId);
+            await _store.VerificationCodes.DeleteOneAsync(
+                Builders<VerificationCodeDoc>.Filter.Eq(c => c.RequestId, requestId), ct);
+            throw new VerificationException(502, "无法发送私信，请确认允许服务器成员私信");
+        }
+
+        return new VerificationTicket(requestId, now.Add(ttl), "dm");
+    }
+
+    public async Task<VerificationTokens> ConfirmAsync(string requestId, string code, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(requestId) || string.IsNullOrWhiteSpace(code))
+        {
+            throw new VerificationException(400, "requestId 与验证码不能为空");
+        }
+
+        var setting = await GetSettingAsync(ct)
+                      ?? throw new VerificationException(404, "尚未配置验证频道");
+
+        var request = await _store.VerificationCodes
+            .Find(Builders<VerificationCodeDoc>.Filter.Eq(c => c.RequestId, requestId))
+            .FirstOrDefaultAsync(ct);
+
+        if (request is null || request.ConsumedAt is not null)
+        {
+            throw new VerificationException(400, "验证请求不存在或已使用");
+        }
+
+        if (request.ExpiresAt < DateTime.UtcNow)
+        {
+            throw new VerificationException(400, "验证码已过期，请重新发起");
+        }
+
+        if (request.Attempts >= MaxAttempts)
+        {
+            throw new VerificationException(400, "尝试次数过多，请重新发起");
+        }
+
+        var normalized = code.Trim().ToUpperInvariant();
+        if (!FixedEquals(HashCode(requestId, normalized), request.CodeHash))
+        {
+            await _store.VerificationCodes.UpdateOneAsync(
+                Builders<VerificationCodeDoc>.Filter.Eq(c => c.Id, request.Id),
+                Builders<VerificationCodeDoc>.Update.Inc(c => c.Attempts, 1),
+                cancellationToken: ct);
+
+            throw new VerificationException(400, "验证码不正确");
+        }
+
+        await _store.VerificationCodes.UpdateOneAsync(
+            Builders<VerificationCodeDoc>.Filter.Eq(c => c.Id, request.Id),
+            Builders<VerificationCodeDoc>.Update.Set(c => c.ConsumedAt, DateTime.UtcNow),
+            cancellationToken: ct);
+
+        return await IssueTokensAsync(request.UserId, request.GuildId, setting, ct);
+    }
+
+    public async Task<VerificationTokens> RefreshAsync(string refreshToken, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(refreshToken))
+        {
+            throw new VerificationException(400, "refreshToken 不能为空");
+        }
+
+        var setting = await GetSettingAsync(ct)
+                      ?? throw new VerificationException(404, "尚未配置验证频道");
+
+        var token = await _store.VerificationTokens
+            .Find(Builders<VerificationTokenDoc>.Filter.Eq(t => t.RefreshTokenHash, HashSecret(refreshToken)))
+            .FirstOrDefaultAsync(ct);
+
+        if (token is null || token.RevokedAt is not null)
+        {
+            throw new VerificationException(401, "refreshToken 无效");
+        }
+
+        if (token.RefreshExpiresAt < DateTime.UtcNow)
+        {
+            throw new VerificationException(401, "refreshToken 已过期，请重新验证");
+        }
+
+        await _store.VerificationTokens.UpdateOneAsync(
+            Builders<VerificationTokenDoc>.Filter.Eq(t => t.Id, token.Id),
+            Builders<VerificationTokenDoc>.Update.Set(t => t.RevokedAt, DateTime.UtcNow),
+            cancellationToken: ct);
+
+        return await IssueTokensAsync(token.UserId, token.GuildId, setting, ct);
+    }
+
+    public async Task<VerificationUser> GetUserAsync(string accessToken, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(accessToken))
+        {
+            throw new VerificationException(401, "缺少 accessToken");
+        }
+
+        var token = await _store.VerificationTokens
+            .Find(Builders<VerificationTokenDoc>.Filter.Eq(t => t.AccessTokenHash, HashSecret(accessToken)))
+            .FirstOrDefaultAsync(ct);
+
+        if (token is null || token.RevokedAt is not null)
+        {
+            throw new VerificationException(401, "accessToken 无效");
+        }
+
+        if (token.AccessExpiresAt < DateTime.UtcNow)
+        {
+            throw new VerificationException(401, "accessToken 已过期");
+        }
+
+        var setting = new VerificationSettingDoc { GuildId = token.GuildId };
+        var guild = await GetGuildAsync(setting, ct);
+        var user = await guild.GetUserAsync(ParseId(token.UserId, "userId"), Options(ct));
+
+        if (user is null)
+        {
+            throw new VerificationException(404, "该用户已不在服务器");
+        }
+
+        var roles = user.RoleIds
+            .Select(id => guild.Roles.FirstOrDefault(r => r.Id == id))
+            .Where(r => r is not null)
+            .Select(r => new VerifiedRole(r!.Id.ToString(), r.Name))
+            .ToList();
+
+        return new VerificationUser(
+            user.Id.ToString(),
+            user.Username,
+            user.GlobalName,
+            user.Nickname,
+            user.GetAvatarUrl(),
+            token.GuildId,
+            roles,
+            user.JoinedAt?.UtcDateTime);
+    }
+
+    private async Task<VerificationTokens> IssueTokensAsync(
+        string userId,
+        string guildId,
+        VerificationSettingDoc setting,
+        CancellationToken ct)
+    {
+        var now = DateTime.UtcNow;
+        var accessToken = NewSecret(32);
+        var refreshToken = NewSecret(32);
+        var accessMinutes = Math.Clamp(setting.AccessTokenMinutes, 5, 1440);
+        var refreshDays = Math.Clamp(setting.RefreshTokenDays, 1, 365);
+
+        await _store.VerificationTokens.InsertOneAsync(new VerificationTokenDoc
+        {
+            UserId = userId,
+            GuildId = guildId,
+            AccessTokenHash = HashSecret(accessToken),
+            RefreshTokenHash = HashSecret(refreshToken),
+            AccessExpiresAt = now.AddMinutes(accessMinutes),
+            RefreshExpiresAt = now.AddDays(refreshDays),
+            CreatedAt = now
+        }, cancellationToken: ct);
+
+        return new VerificationTokens(accessToken, refreshToken, accessMinutes * 60);
+    }
+
+    private async Task<RestGuild> GetGuildAsync(VerificationSettingDoc setting, CancellationToken ct)
+    {
+        if (!ulong.TryParse(setting.GuildId, out var guildId) || guildId == 0)
+        {
+            throw new VerificationException(500, "验证服务器配置无效");
+        }
+
+        try
+        {
+            return await _client.Rest.GetGuildAsync(guildId, Options(ct));
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "Could not load guild {GuildId} for verification", guildId);
+            throw new VerificationException(502, "无法读取服务器信息");
+        }
+    }
+
+    private static bool CanView(
+        IGuildUser user,
+        RestGuild guild,
+        RestGuildChannel channel,
+        IReadOnlyDictionary<ulong, ulong> rolePermissions)
+    {
+        var permissions = guild.EveryoneRole.Permissions.RawValue;
+        foreach (var roleId in user.RoleIds)
+        {
+            if (rolePermissions.TryGetValue(roleId, out var value))
+            {
+                permissions |= value;
+            }
+        }
+
+        if ((permissions & AdministratorBit) != 0)
+        {
+            return true;
+        }
+
+        var roleIds = user.RoleIds.ToHashSet();
+        ulong allow = 0;
+        ulong deny = 0;
+
+        foreach (var overwrite in channel.PermissionOverwrites)
+        {
+            if (overwrite.TargetType != PermissionTarget.Role)
+            {
+                continue;
+            }
+
+            if (overwrite.TargetId == guild.Id || roleIds.Contains(overwrite.TargetId))
+            {
+                allow |= overwrite.Permissions.AllowValue;
+                deny |= overwrite.Permissions.DenyValue;
+            }
+        }
+
+        permissions = (permissions & ~deny) | allow;
+
+        foreach (var overwrite in channel.PermissionOverwrites)
+        {
+            if (overwrite.TargetType == PermissionTarget.User && overwrite.TargetId == user.Id)
+            {
+                permissions = (permissions & ~overwrite.Permissions.DenyValue) | overwrite.Permissions.AllowValue;
+            }
+        }
+
+        return (permissions & ViewChannelBit) != 0;
+    }
+
+    private static ulong ParseId(string? value, string name)
+    {
+        if (!ulong.TryParse(value, out var id) || id == 0)
+        {
+            throw new VerificationException(400, $"{name} 不是合法的 Discord ID");
+        }
+
+        return id;
+    }
+
+    private static string NewCode()
+    {
+        // Two letters and two digits in random order: always mixed, always uppercase.
+        var chars = new[]
+        {
+            LetterAlphabet[RandomNumberGenerator.GetInt32(LetterAlphabet.Length)],
+            LetterAlphabet[RandomNumberGenerator.GetInt32(LetterAlphabet.Length)],
+            DigitAlphabet[RandomNumberGenerator.GetInt32(DigitAlphabet.Length)],
+            DigitAlphabet[RandomNumberGenerator.GetInt32(DigitAlphabet.Length)]
+        };
+
+        RandomNumberGenerator.Shuffle(chars);
+        return new string(chars);
+    }
+
+    private static string NewSecret(int bytes) =>
+        Convert.ToBase64String(RandomNumberGenerator.GetBytes(bytes))
+            .Replace('+', '-')
+            .Replace('/', '_')
+            .TrimEnd('=');
+
+    private static string HashCode(string requestId, string code) =>
+        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes($"{requestId}:{code}")));
+
+    private static string HashSecret(string value) =>
+        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value)));
+
+    private static bool FixedEquals(string left, string right)
+    {
+        var a = Encoding.UTF8.GetBytes(left);
+        var b = Encoding.UTF8.GetBytes(right);
+        return a.Length == b.Length && CryptographicOperations.FixedTimeEquals(a, b);
+    }
+
+    private static RequestOptions Options(CancellationToken ct) =>
+        new() { RetryMode = RetryMode.Retry502, Timeout = 15000, CancelToken = ct };
+}
