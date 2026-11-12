@@ -34,6 +34,7 @@ builder.Services.AddSingleton<VerificationService>();
 builder.Services.AddHostedService<MongoInitializer>();
 builder.Services.AddHostedService<MessageWorker>();
 builder.Services.AddHostedService<KeepAliveService>();
+builder.Services.AddHostedService<VerificationJanitor>();
 
 var app = builder.Build();
 

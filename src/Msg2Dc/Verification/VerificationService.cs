@@ -1,8 +1,10 @@
 using System.Security.Cryptography;
 using System.Text;
 using Discord;
+using Discord.Net;
 using Discord.Rest;
 using Discord.WebSocket;
+using MongoDB.Bson;
 using MongoDB.Driver;
 using Msg2Dc.Discord;
 using Msg2Dc.Storage;
@@ -234,6 +236,9 @@ public sealed class VerificationService
             throw new VerificationException(429, "请求过于频繁，请稍后再试");
         }
 
+        // An abandoned code leaves its private thread behind; clear it before issuing a new one.
+        await CleanupThreadsForUserAsync(userId, ct);
+
         var code = NewCode();
         var requestId = Guid.NewGuid().ToString("N");
         var now = DateTime.UtcNow;
@@ -334,22 +339,102 @@ public sealed class VerificationService
 
         var tokens = await IssueTokensAsync(request.UserId, request.GuildId, setting, ct);
 
-        if (!string.IsNullOrWhiteSpace(request.ThreadId) && ulong.TryParse(request.ThreadId, out var threadId))
+        if (ulong.TryParse(request.ThreadId, out var threadId) && await TryDeleteThreadAsync(threadId, ct))
         {
-            try
-            {
-                if (await _client.Rest.GetChannelAsync(threadId, Options(ct)) is IDeletable deletable)
-                {
-                    await deletable.DeleteAsync();
-                }
-            }
-            catch (Exception ex)
-            {
-                _log.LogDebug(ex, "Could not delete verification thread {ThreadId}", request.ThreadId);
-            }
+            await ClearThreadAsync(request.Id, ct);
         }
 
         return tokens;
+    }
+
+    /// <summary>
+    /// Deletes the private threads of codes that expired without being confirmed, and drops
+    /// old request/token rows. Runs on a timer and before a member asks for a new code.
+    /// </summary>
+    public async Task<int> CleanupAsync(CancellationToken ct)
+    {
+        var now = DateTime.UtcNow;
+
+        var stale = await _store.VerificationCodes
+            .Find(Builders<VerificationCodeDoc>.Filter.And(
+                Builders<VerificationCodeDoc>.Filter.Lt(c => c.ExpiresAt, now),
+                Builders<VerificationCodeDoc>.Filter.Ne(c => c.ThreadId, null)))
+            .Limit(50)
+            .ToListAsync(ct);
+
+        var deleted = 0;
+        foreach (var code in stale)
+        {
+            if (ulong.TryParse(code.ThreadId, out var threadId) && await TryDeleteThreadAsync(threadId, ct))
+            {
+                await ClearThreadAsync(code.Id, ct);
+                deleted++;
+            }
+        }
+
+        await _store.VerificationCodes.DeleteManyAsync(
+            Builders<VerificationCodeDoc>.Filter.Lt(c => c.CreatedAt, now.AddDays(-1)),
+            ct);
+
+        await _store.VerificationTokens.DeleteManyAsync(
+            Builders<VerificationTokenDoc>.Filter.Lt(t => t.RefreshExpiresAt, now.AddDays(-7)),
+            ct);
+
+        return deleted;
+    }
+
+    private async Task CleanupThreadsForUserAsync(string userId, CancellationToken ct)
+    {
+        try
+        {
+            var stale = await _store.VerificationCodes
+                .Find(Builders<VerificationCodeDoc>.Filter.And(
+                    Builders<VerificationCodeDoc>.Filter.Eq(c => c.UserId, userId),
+                    Builders<VerificationCodeDoc>.Filter.Lt(c => c.ExpiresAt, DateTime.UtcNow),
+                    Builders<VerificationCodeDoc>.Filter.Ne(c => c.ThreadId, null)))
+                .ToListAsync(ct);
+
+            foreach (var code in stale)
+            {
+                if (ulong.TryParse(code.ThreadId, out var threadId) && await TryDeleteThreadAsync(threadId, ct))
+                {
+                    await ClearThreadAsync(code.Id, ct);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _log.LogDebug(ex, "Could not clean up stale verification threads for {UserId}", userId);
+        }
+    }
+
+    private Task ClearThreadAsync(ObjectId codeId, CancellationToken ct) =>
+        _store.VerificationCodes.UpdateOneAsync(
+            Builders<VerificationCodeDoc>.Filter.Eq(c => c.Id, codeId),
+            Builders<VerificationCodeDoc>.Update.Set(c => c.ThreadId, (string?)null),
+            cancellationToken: ct);
+
+    private async Task<bool> TryDeleteThreadAsync(ulong threadId, CancellationToken ct)
+    {
+        try
+        {
+            if (await _client.Rest.GetChannelAsync(threadId, Options(ct)) is IDeletable deletable)
+            {
+                await deletable.DeleteAsync();
+            }
+
+            return true;
+        }
+        catch (global::Discord.Net.HttpException ex) when ((int)ex.HttpCode == 404)
+        {
+            // Already gone; nothing left to delete.
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _log.LogDebug(ex, "Could not delete verification thread {ThreadId}", threadId);
+            return false;
+        }
     }
 
     /// <summary>
