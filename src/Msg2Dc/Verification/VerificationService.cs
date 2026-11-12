@@ -250,9 +250,7 @@ public sealed class VerificationService
             ExpiresAt = now.Add(ttl)
         }, cancellationToken: ct);
 
-        var text =
-            $"你的 Discord 身份验证码：**{code}**（{ttl.TotalMinutes:F0} 分钟内有效）\n" +
-            "如果不是你本人发起，请忽略这条消息。";
+        var text = $"验证码：**{code}**\n{ttl.TotalMinutes:F0} 分钟内有效";
 
         string delivery;
         try
@@ -384,10 +382,7 @@ public sealed class VerificationService
             options: Options(ct));
 
         await thread.AddUserAsync(user, Options(ct));
-        await thread.SendMessageAsync(
-            $"<@{user.Id}> 你的 Discord 身份验证码：**{code}**（{ttl.TotalMinutes:F0} 分钟内有效）\n" +
-            "验证成功后这个线程会自动删除。",
-            allowedMentions: AllowedMentions.None);
+        await thread.SendMessageAsync($"**{code}**", allowedMentions: AllowedMentions.None);
 
         return thread.Id.ToString();
     }
