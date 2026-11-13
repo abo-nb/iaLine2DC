@@ -47,6 +47,7 @@ GET /api/verify/status
 ```json
 {
   "configured": true,
+  "clientIp": "203.0.113.7",
   "guildId": "1565364542995960009",
   "channelId": "1565364543809650690",
   "codeTtlMinutes": 5,
