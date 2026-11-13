@@ -160,12 +160,13 @@ app.UseWhen(
 // 成员名单和发起验证需要 X-Api-Key（管理员用 /verify-key 查看）；
 // confirm / token / me 只需要各自拿到的东西，不再要求 API Key。
 
-app.MapGet("/api/verify/status", async (VerificationService verify, CancellationToken ct) =>
+app.MapGet("/api/verify/status", async (HttpContext context, VerificationService verify, CancellationToken ct) =>
 {
     var setting = await verify.GetSettingAsync(ct);
     return Results.Ok(new
     {
         configured = setting is not null,
+        clientIp = ClientIp(context),
         guildId = setting?.GuildId,
         channelId = setting?.ChannelId,
         codeTtlMinutes = setting?.CodeTtlMinutes,
@@ -333,15 +334,22 @@ app.MapGet("/diag/discord", async (CancellationToken ct) =>
 static IResult VerifyError(VerificationException ex) =>
     Results.Json(new { error = ex.Message }, statusCode: ex.StatusCode);
 
-// Render 在 X-Forwarded-For 末尾追加真实客户端地址；没有这个头时退回连接地址。
+// Render 前面有 Cloudflare：CF-Connecting-IP 是真正的客户端地址，X-Forwarded-For 的
+// 末段只是边缘节点（每次都变，按它计数等于不计数）。
 static string? ClientIp(HttpContext context)
 {
+    if (context.Request.Headers.TryGetValue("CF-Connecting-IP", out var cloudflare) &&
+        !string.IsNullOrWhiteSpace(cloudflare.ToString()))
+    {
+        return cloudflare.ToString().Trim();
+    }
+
     if (context.Request.Headers.TryGetValue("X-Forwarded-For", out var forwarded))
     {
         var parts = forwarded.ToString().Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         if (parts.Length > 0)
         {
-            return parts[^1];
+            return parts[0];
         }
     }
 
