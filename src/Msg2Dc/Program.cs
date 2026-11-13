@@ -30,6 +30,7 @@ builder.Services.AddSingleton<LineApiClient>();
 builder.Services.AddLlmModule();
 builder.Services.AddDiscordModule();
 builder.Services.AddSingleton<VerificationService>();
+builder.Services.AddSingleton<AbuseGuard>();
 
 builder.Services.AddHostedService<MongoInitializer>();
 builder.Services.AddHostedService<MessageWorker>();
@@ -135,6 +136,25 @@ app.MapPost("/line/webhook", async (
         return Results.StatusCode(StatusCodes.Status500InternalServerError);
     }
 });
+
+// 验证接口按 IP 计速：一分钟内超过 100 次视为扫描，临时封禁 10 分钟。
+app.UseWhen(
+    context => context.Request.Path.StartsWithSegments("/api/verify"),
+    branch => branch.Use(async (context, next) =>
+    {
+        var guard = context.RequestServices.GetRequiredService<AbuseGuard>();
+        var (banned, retryAfter) = guard.Check(ClientIp(context));
+
+        if (banned)
+        {
+            context.Response.StatusCode = StatusCodes.Status429TooManyRequests;
+            context.Response.Headers.RetryAfter = retryAfter.ToString();
+            await context.Response.WriteAsJsonAsync(new { error = "请求过于频繁，已临时禁止访问", retryAfterSeconds = retryAfter });
+            return;
+        }
+
+        await next(context);
+    }));
 
 // ─── 身份验证 API（给其他服务器用）───────────────────────────────
 // 成员名单和发起验证需要 X-Api-Key（管理员用 /verify-key 查看）；
@@ -312,6 +332,21 @@ app.MapGet("/diag/discord", async (CancellationToken ct) =>
 
 static IResult VerifyError(VerificationException ex) =>
     Results.Json(new { error = ex.Message }, statusCode: ex.StatusCode);
+
+// Render 在 X-Forwarded-For 末尾追加真实客户端地址；没有这个头时退回连接地址。
+static string? ClientIp(HttpContext context)
+{
+    if (context.Request.Headers.TryGetValue("X-Forwarded-For", out var forwarded))
+    {
+        var parts = forwarded.ToString().Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (parts.Length > 0)
+        {
+            return parts[^1];
+        }
+    }
+
+    return context.Connection.RemoteIpAddress?.ToString();
+}
 
 app.Run();
 

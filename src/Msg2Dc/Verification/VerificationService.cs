@@ -62,7 +62,7 @@ public sealed class VerificationService
     private const string LetterAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ";
     private const string DigitAlphabet = "23456789";
 
-    private static readonly TimeSpan RequestCooldown = TimeSpan.FromSeconds(60);
+    private static readonly TimeSpan RequestCooldown = TimeSpan.FromSeconds(5);
 
     private readonly MongoStore _store;
     private readonly DiscordSocketClient _client;
