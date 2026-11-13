@@ -62,7 +62,8 @@ public sealed class VerificationService
     private const string LetterAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ";
     private const string DigitAlphabet = "23456789";
 
-    private static readonly TimeSpan RequestCooldown = TimeSpan.FromSeconds(5);
+    private const int MaxRequestsPerUser = 4;
+    private static readonly TimeSpan UserRequestWindow = TimeSpan.FromMinutes(10);
 
     private readonly MongoStore _store;
     private readonly DiscordSocketClient _client;
@@ -224,20 +225,23 @@ public sealed class VerificationService
             throw new VerificationException(404, "该用户不在服务器中");
         }
 
-        var cutoff = DateTime.UtcNow.Subtract(RequestCooldown);
-        var recent = await _store.VerificationCodes
-            .Find(Builders<VerificationCodeDoc>.Filter.And(
+        // People retry when the code does not arrive, so allow a few attempts per window
+        // instead of a hard interval between requests.
+        var cutoff = DateTime.UtcNow.Subtract(UserRequestWindow);
+        var recent = await _store.VerificationCodes.CountDocumentsAsync(
+            Builders<VerificationCodeDoc>.Filter.And(
                 Builders<VerificationCodeDoc>.Filter.Eq(c => c.UserId, userId),
-                Builders<VerificationCodeDoc>.Filter.Gte(c => c.CreatedAt, cutoff)))
-            .FirstOrDefaultAsync(ct);
+                Builders<VerificationCodeDoc>.Filter.Gte(c => c.CreatedAt, cutoff)),
+            cancellationToken: ct);
 
-        if (recent is not null)
+        if (recent >= MaxRequestsPerUser)
         {
-            throw new VerificationException(429, "请求过于频繁，请稍后再试");
+            throw new VerificationException(429,
+                $"验证码请求太频繁：{UserRequestWindow.TotalMinutes:F0} 分钟内最多 {MaxRequestsPerUser} 次");
         }
 
-        // An abandoned code leaves its private thread behind; clear it before issuing a new one.
-        await CleanupThreadsForUserAsync(userId, ct);
+        // A new code supersedes the old one: drop its thread and mark it used.
+        await SupersedePreviousCodesAsync(userId, ct);
 
         var code = NewCode();
         var requestId = Guid.NewGuid().ToString("N");
@@ -388,28 +392,41 @@ public sealed class VerificationService
         return deleted;
     }
 
-    private async Task CleanupThreadsForUserAsync(string userId, CancellationToken ct)
+    /// <summary>
+    /// A retried code replaces the previous one: its thread goes away and the old code can
+    /// no longer be confirmed, so only the newest one is live.
+    /// </summary>
+    private async Task SupersedePreviousCodesAsync(string userId, CancellationToken ct)
     {
         try
         {
-            var stale = await _store.VerificationCodes
+            var active = await _store.VerificationCodes
                 .Find(Builders<VerificationCodeDoc>.Filter.And(
                     Builders<VerificationCodeDoc>.Filter.Eq(c => c.UserId, userId),
-                    Builders<VerificationCodeDoc>.Filter.Lt(c => c.ExpiresAt, DateTime.UtcNow),
-                    Builders<VerificationCodeDoc>.Filter.Ne(c => c.ThreadId, null)))
+                    Builders<VerificationCodeDoc>.Filter.Eq(c => c.ConsumedAt, null)))
                 .ToListAsync(ct);
 
-            foreach (var code in stale)
+            if (active.Count == 0)
+            {
+                return;
+            }
+
+            foreach (var code in active)
             {
                 if (ulong.TryParse(code.ThreadId, out var threadId) && await TryDeleteThreadAsync(threadId, ct))
                 {
                     await ClearThreadAsync(code.Id, ct);
                 }
             }
+
+            await _store.VerificationCodes.UpdateManyAsync(
+                Builders<VerificationCodeDoc>.Filter.In(c => c.Id, active.Select(c => c.Id)),
+                Builders<VerificationCodeDoc>.Update.Set(c => c.ConsumedAt, DateTime.UtcNow),
+                cancellationToken: ct);
         }
         catch (Exception ex)
         {
-            _log.LogDebug(ex, "Could not clean up stale verification threads for {UserId}", userId);
+            _log.LogDebug(ex, "Could not supersede previous verification codes for {UserId}", userId);
         }
     }
 
